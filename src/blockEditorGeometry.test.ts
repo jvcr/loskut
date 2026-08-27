@@ -9,6 +9,7 @@ import {
   resizeGroup,
   rotateGroup,
   splitGroup,
+  splitGroupsBySeam,
   type DraftGroup,
   type PrimitiveKind,
   type SplitKind,
@@ -263,5 +264,104 @@ describe('polygon overlap detection', () => {
   it('does not treat the intentional seams within one group as overlap', () => {
     expect(hasPolygonOverlap([createPrimitive('qst', 0, 'qst')])).toBe(false)
     expect(hasPolygonOverlap([])).toBe(false)
+  })
+})
+
+describe('seam splitting', () => {
+  it('splits a region vertically into two one-shape regions', () => {
+    const source = rectangleGroup('vertical', 0, 0, 1, 1, 4)
+
+    const split = splitGroupsBySeam([source], { x: 0.5, y: 0 }, { x: 0.5, y: 1 })
+
+    expect(split.map((group) => group.id)).toEqual(['vertical-a', 'vertical-b'])
+    expect(split.map(groupBounds)).toEqual([
+      { x: 0, y: 0, width: 0.5, height: 1 },
+      { x: 0.5, y: 0, width: 0.5, height: 1 },
+    ])
+    expect(split.every((group) => group.shapes.length === 1)).toBe(true)
+    expect(split.map((group) => group.shapes[0].color)).toEqual([4, 4])
+  })
+
+  it('splits a region horizontally and preserves its area', () => {
+    const source = rectangleGroup('horizontal', 0.1, 0.2, 0.9, 0.8, 6)
+    const originalArea = totalArea(source.shapes)
+
+    const split = splitGroupsBySeam([source], { x: 0, y: 0.4 }, { x: 1, y: 0.4 })
+
+    expect(split.map(groupBounds)).toEqual([
+      { x: 0.1, y: 0.4, width: 0.8, height: 0.4 },
+      { x: 0.1, y: 0.2, width: 0.8, height: 0.2 },
+    ])
+    expect(split.reduce((sum, group) => sum + totalArea(group.shapes), 0)).toBeCloseTo(originalArea, 12)
+  })
+
+  it('clips both sides of a diagonal seam into convex polygons', () => {
+    const source = rectangleGroup('diagonal', 0, 0, 1, 1, 3)
+
+    const split = splitGroupsBySeam([source], { x: 0, y: 0 }, { x: 1, y: 1 })
+
+    expect(split).toHaveLength(2)
+    expect(split.map((group) => polygonArea(group.shapes[0].points))).toEqual([0.5, 0.5])
+    expect(split.every((group) => group.shapes[0].points.length === 3)).toBe(true)
+    expect(split.reduce((sum, group) => sum + totalArea(group.shapes), 0)).toBeCloseTo(1, 12)
+    expect(hasPolygonOverlap(split)).toBe(false)
+  })
+
+  it('splits every crossed region while retaining uncrossed regions and unique ids', () => {
+    const upper = rectangleGroup('upper', 0.05, 0.05, 0.45, 0.45, 1)
+    const lower = rectangleGroup('lower', 0.55, 0.55, 0.95, 0.95, 2)
+    const untouched = rectangleGroup('upper-a', 0.05, 0.75, 0.35, 0.95, 7)
+    const originalArea = [upper, lower, untouched]
+      .reduce((sum, group) => sum + totalArea(group.shapes), 0)
+
+    const split = splitGroupsBySeam(
+      [upper, lower, untouched],
+      { x: 0, y: 0.25 },
+      { x: 1, y: 0.75 },
+    )
+
+    expect(split.map((group) => group.id)).toEqual([
+      'upper-a-2',
+      'upper-b',
+      'lower-a',
+      'lower-b',
+      'upper-a',
+    ])
+    expect(new Set(split.map((group) => group.id)).size).toBe(split.length)
+    expect(split[4]).toBe(untouched)
+    expect(hasPolygonOverlap(split)).toBe(false)
+    expect(split.reduce((sum, group) => sum + totalArea(group.shapes), 0)).toBeCloseTo(originalArea, 12)
+  })
+
+  it('does nothing when the seam only touches a boundary or vertex, or has zero length', () => {
+    const source = rectangleGroup('source', 0.2, 0.2, 0.8, 0.8)
+    const alongEdge = splitGroupsBySeam([source], { x: 0.2, y: 0 }, { x: 0.2, y: 1 })
+    const throughVertex = splitGroupsBySeam([source], { x: 0, y: 0.4 }, { x: 0.4, y: 0 })
+    const zeroLength = splitGroupsBySeam([source], { x: 0.5, y: 0.5 }, { x: 0.5, y: 0.5 })
+
+    expect(alongEdge).toEqual([source])
+    expect(throughVertex).toEqual([source])
+    expect(zeroLength).toEqual([source])
+    expect(alongEdge[0]).toBe(source)
+    expect(throughVertex[0]).toBe(source)
+    expect(zeroLength[0]).toBe(source)
+  })
+
+  it('never mutates source groups or nested geometry', () => {
+    const source = rectangleGroup('immutable', 0, 0, 1, 1, 9)
+    const original = structuredClone(source)
+    Object.freeze(source.shapes[0].points)
+    Object.freeze(source.shapes[0])
+    Object.freeze(source.shapes)
+    Object.freeze(source)
+
+    const split = splitGroupsBySeam([source], { x: 0.3, y: 0 }, { x: 0.7, y: 1 })
+
+    expect(source).toEqual(original)
+    expect(split).toHaveLength(2)
+    expect(split[0]).not.toBe(source)
+    expect(split[0].shapes).not.toBe(source.shapes)
+    expect(split[0].shapes[0].points).not.toBe(source.shapes[0].points)
+    expect(split.map((group) => group.shapes[0].color)).toEqual([9, 9])
   })
 })
