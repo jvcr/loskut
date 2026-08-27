@@ -12,7 +12,6 @@ export interface BlockEditorModalProps {
 }
 
 type PatternWithDimensions = BlockPattern & { widthCm?: number; heightCm?: number }
-type Tool = 'seam' | 'color'
 type Symmetry = 'none' | 'mirror-x' | 'mirror-y' | 'rotate-4'
 type Snapshot = { background: number; groups: DraftGroup[]; palette: string[]; gridDivisions: number }
 type History = { past: Snapshot[]; present: Snapshot; future: Snapshot[] }
@@ -128,7 +127,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
   const [height, setHeight] = useState(String(toDisplayLength(source?.heightCm ?? 25)))
   const initialSnapshot = useMemo<Snapshot>(() => ({ background: pattern?.background ?? 0, groups: groupsFromPattern(pattern), palette: [...palette], gridDivisions: pattern?.editor?.gridDivisions ?? 8 }), [palette, pattern])
   const [history, setHistory] = useState<History>({ past: [], present: initialSnapshot, future: [] })
-  const [tool, setTool] = useState<Tool>('seam')
+  const gestureRegionId = useRef<string | null>(null)
   const [symmetry, setSymmetry] = useState<Symmetry>('none')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [activeColor, setActiveColor] = useState(palette[1] ? 1 : 0)
@@ -176,23 +175,30 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
     }
   }
 
-  const startSeam = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (tool !== 'seam') return
+  const startGesture = (event: ReactPointerEvent<SVGSVGElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
     const start = canvasPoint(event)
+    gestureRegionId.current = (event.target as SVGPolygonElement).dataset.regionId ?? null
     setSeamStart(start)
     setSeamEnd(start)
   }
-  const previewSeam = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (tool === 'seam' && seamStart) setSeamEnd(canvasPoint(event))
+  const previewGesture = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (seamStart) setSeamEnd(canvasPoint(event))
   }
-  const finishSeam = () => {
+  const finishGesture = () => {
     if (!seamStart || !seamEnd) return
-    commit((current) => {
-      let groups = current.groups
-      for (const [start, end] of symmetricSeams(seamStart, seamEnd, symmetry)) groups = splitGroupsBySeam(groups, start, end)
-      return { ...current, groups }
-    })
+    const isClick = seamStart.x === seamEnd.x && seamStart.y === seamEnd.y
+    if (isClick) {
+      setSelectedId(gestureRegionId.current)
+    } else {
+      commit((current) => {
+        let groups = current.groups
+        for (const [start, end] of symmetricSeams(seamStart, seamEnd, symmetry)) groups = splitGroupsBySeam(groups, start, end)
+        return { ...current, groups }
+      })
+      setSelectedId(null)
+    }
+    gestureRegionId.current = null
     setSeamStart(null)
     setSeamEnd(null)
   }
@@ -243,18 +249,18 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
         <div className="seam-editor-body">
           <aside className="seam-editor-sidebar">
             <section><h3>{text('Основа блока', 'Block foundation')}</h3><p>{text('Выберите готовое разбиение или начните с цельного квадрата.', 'Choose a starting partition or begin with a whole square.')}</p><div className="seam-editor-presets">{PRESETS.map((preset) => { const preview = presetGroups(preset.id); return <button className="seam-editor-preset" type="button" key={preset.id} onClick={() => applyPreset(preset.id)}><svg viewBox="0 0 100 100" aria-hidden="true"><rect width="100" height="100" fill={snapshot.palette[0]} />{preview.flatMap((group) => group.shapes.map((item, index) => <polygon key={`${group.id}-${index}`} points={item.points.map(([x, y]) => `${x * 100},${y * 100}`).join(' ')} fill={snapshot.palette[item.color] ?? snapshot.palette[0]} />))}</svg><span>{text(preset.ru, preset.en)}</span></button> })}</div></section>
-            <section><h3>{text('Инструмент', 'Tool')}</h3><div className="seam-editor-tools"><button className={`seam-editor-tool${tool === 'seam' ? ' is-active' : ''}`} type="button" onClick={() => setTool('seam')} aria-pressed={tool === 'seam'}><b>╱</b><span>{text('Провести шов', 'Draw seam')}</span></button><button className={`seam-editor-tool${tool === 'color' ? ' is-active' : ''}`} type="button" onClick={() => setTool('color')} aria-pressed={tool === 'color'}><b>●</b><span>{text('Выбрать деталь', 'Select region')}</span></button></div></section>
+            <section className="seam-editor-gesture-guide" aria-labelledby="seam-editor-how-title"><h3 id="seam-editor-how-title">{text('Как редактировать', 'How to edit')}</h3><p><b>1</b><span>{text('Нажмите на деталь, затем выберите ей цвет справа.', 'Click a region, then choose its color on the right.')}</span></p><p><b>2</b><span>{text('Проведите линию по блоку, чтобы добавить шов.', 'Drag a line across the block to add a seam.')}</span></p></section>
           </aside>
 
           <main className="seam-editor-canvas-panel">
             <div className="seam-editor-topbar"><label>{text('Сетка', 'Grid')}<select value={snapshot.gridDivisions} onChange={(event) => commit((current) => ({ ...current, gridDivisions: Number(event.target.value) }))}>{[2, 3, 4, 6, 8, 10, 12, 16, 24].map((value) => <option key={value} value={value}>{value} × {value}</option>)}</select></label><label><input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />{text('Показывать', 'Show')}</label><label>{text('Симметрия шва', 'Seam symmetry')}<select value={symmetry} onChange={(event) => setSymmetry(event.target.value as Symmetry)}><option value="none">{text('Нет', 'None')}</option><option value="mirror-x">{text('Зеркало ↔', 'Mirror ↔')}</option><option value="mirror-y">{text('Зеркало ↕', 'Mirror ↕')}</option><option value="rotate-4">{text('4 поворота', '4 rotations')}</option></select></label></div>
-            <svg ref={canvas} className="seam-editor-canvas" viewBox="0 0 100 100" preserveAspectRatio="none" onPointerDown={startSeam} onPointerMove={previewSeam} onPointerUp={finishSeam} onPointerCancel={() => { setSeamStart(null); setSeamEnd(null) }} aria-label={text('Чертёж блока: проведите шов между точками сетки', 'Block drafting canvas: draw a seam between grid points')}>
+            <svg ref={canvas} className="seam-editor-canvas" viewBox="0 0 100 100" preserveAspectRatio="none" onPointerDown={startGesture} onPointerMove={previewGesture} onPointerUp={finishGesture} onPointerCancel={() => { gestureRegionId.current = null; setSeamStart(null); setSeamEnd(null) }} aria-label={text('Чертёж блока: нажмите на деталь или проведите шов', 'Block canvas: click a region or drag a seam')}>
               <rect width="100" height="100" fill={snapshot.palette[snapshot.background] ?? snapshot.palette[0]} />
-              {snapshot.groups.map((group) => group.shapes.map((item, index) => <polygon className={`seam-editor-region${selectedId === group.id ? ' seam-editor-region--selected' : ''}`} key={`${group.id}-${index}`} points={item.points.map(([x, y]) => `${x * 100},${y * 100}`).join(' ')} fill={snapshot.palette[item.color] ?? snapshot.palette[0]} role="button" tabIndex={0} onPointerDown={(event) => { if (tool === 'color') { event.stopPropagation(); setSelectedId(group.id) } }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(group.id) }} aria-label={text(`Деталь, цвет ${colorTag(item.color)}`, `Region, color ${colorTag(item.color)}`)} />))}
+              {snapshot.groups.map((group) => group.shapes.map((item, index) => <polygon className={`seam-editor-region${selectedId === group.id ? ' seam-editor-region--selected' : ''}`} data-region-id={group.id} key={`${group.id}-${index}`} points={item.points.map(([x, y]) => `${x * 100},${y * 100}`).join(' ')} fill={snapshot.palette[item.color] ?? snapshot.palette[0]} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(group.id) }} aria-label={text(`Деталь, цвет ${colorTag(item.color)}`, `Region, color ${colorTag(item.color)}`)} />))}
               {showGrid && <g className="seam-editor-grid" aria-hidden="true">{Array.from({ length: snapshot.gridDivisions - 1 }, (_, index) => index + 1).flatMap((value) => [<line key={`v-${value}`} x1={value * 100 / snapshot.gridDivisions} x2={value * 100 / snapshot.gridDivisions} y1="0" y2="100" />, <line key={`h-${value}`} y1={value * 100 / snapshot.gridDivisions} y2={value * 100 / snapshot.gridDivisions} x1="0" x2="100" />])}</g>}
               {seamStart && seamEnd && <><line className="seam-editor-seam-preview" x1={seamStart.x * 100} y1={seamStart.y * 100} x2={seamEnd.x * 100} y2={seamEnd.y * 100} /><circle className="seam-editor-snap-point" cx={seamStart.x * 100} cy={seamStart.y * 100} r="1.4" /><circle className="seam-editor-snap-point" cx={seamEnd.x * 100} cy={seamEnd.y * 100} r="1.4" /></>}
             </svg>
-            <p className="seam-editor-status" role="status">{tool === 'seam' ? text('Проведите линию от одной точки сетки к другой. Все пересечённые детали разделятся.', 'Draw from one grid point to another. Every crossed region will split.') : selectedId ? text('Деталь выбрана — назначьте ей цвет.', 'Region selected—assign a color.') : text('Нажмите на деталь для перекраски.', 'Select a region to recolor it.')}</p>
+            <p className="seam-editor-status" role="status">{selectedId ? text('Деталь выбрана — нажмите нужный цвет справа или проведите новый шов.', 'Region selected—choose a color on the right or draw another seam.') : text('Клик выбирает деталь · движение с зажатой кнопкой проводит шов', 'Click selects a region · drag draws a seam')}</p>
           </main>
 
           <aside className="seam-editor-inspector">

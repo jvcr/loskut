@@ -279,69 +279,32 @@
   box-shadow: inset 0 0 0 var(--seam-stroke) var(--seam-accent);
 }
 
-.seam-editor-tools {
+.seam-editor-gesture-guide {
   display: grid;
-  gap: var(--seam-space-2);
-  margin-top: var(--seam-space-3);
+  gap: var(--seam-space-3);
 }
 
-.seam-editor-tool {
-  width: 100%;
-  min-height: var(--seam-control);
+.seam-editor-gesture-guide p {
   display: grid;
-  grid-template-columns: var(--seam-control) minmax(0, 1fr);
+  grid-template-columns: 36px minmax(0, 1fr);
   align-items: center;
-  gap: var(--seam-space-2);
-  padding: 0 var(--seam-space-3) 0 0;
-  border: var(--seam-stroke) solid var(--seam-border);
-  border-radius: var(--seam-radius-sm);
-  background: var(--seam-paper);
+  gap: var(--seam-space-3);
+  margin: 0;
   color: var(--seam-ink);
-  cursor: pointer;
   font-size: var(--seam-text-ui);
-  font-weight: 750;
-  line-height: 1.3;
-  text-align: left;
-  transition: border-color var(--seam-transition), background-color var(--seam-transition), color var(--seam-transition);
+  font-weight: 650;
+  line-height: 1.4;
 }
 
-.seam-editor-tool > :first-child {
-  width: var(--seam-control);
-  height: 100%;
+.seam-editor-gesture-guide b {
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  border-right: var(--seam-stroke) solid currentColor;
-  color: inherit;
-  font-size: var(--seam-space-5);
-}
-
-.seam-editor-tools > .seam-editor-tool:first-child {
-  border-color: var(--seam-accent);
+  border-radius: 50%;
   background: var(--seam-accent-soft);
   color: var(--seam-accent-strong);
-}
-
-.seam-editor-tool:hover:not(:disabled) {
-  border-color: var(--seam-accent);
-  background: var(--seam-accent-hover);
-  color: var(--seam-accent-strong);
-}
-
-.seam-editor-tool[aria-pressed='true'],
-.seam-editor-tool.is-active,
-.seam-editor-tool--active {
-  border-color: var(--seam-accent);
-  background: var(--seam-accent);
-  color: var(--seam-paper);
-  box-shadow: 0 var(--seam-space-1) var(--seam-space-3) var(--seam-focus);
-}
-
-.seam-editor-tool[aria-pressed='true']:hover:not(:disabled),
-.seam-editor-tool.is-active:hover:not(:disabled),
-.seam-editor-tool--active:hover:not(:disabled) {
-  border-color: var(--seam-accent-strong);
-  background: var(--seam-accent-strong);
-  color: var(--seam-paper);
+  font-size: var(--seam-text-ui);
 }
 
 .seam-editor-canvas-panel {
@@ -871,9 +834,6 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  .seam-editor-tools {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 
   .seam-editor-canvas-panel {
     min-height: 0;
@@ -942,9 +902,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .seam-editor-tools {
-    grid-template-columns: minmax(0, 1fr);
-  }
 
   .seam-editor-canvas-panel {
     padding-top: var(--seam-space-5);
