@@ -111,6 +111,36 @@ describe('quilt document', () => {
     ])
   })
 
+  it('preserves valid custom block editor groups and removes invalid shape references', () => {
+    const migrated = migrateDocument({
+      ...createDocument(1, 1),
+      customPatterns: [{
+        id: 'custom-units',
+        name: 'Units',
+        background: 0,
+        source: 'custom',
+        shapes: [
+          { color: 1, points: [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]] },
+          { color: 2, points: [[0.5, 0], [1, 0], [1, 0.5], [0.5, 0.5]] },
+        ],
+        editor: {
+          version: 1,
+          gridDivisions: 12,
+          groups: [
+            { id: 'pair', shapeIndices: [0, 1, 1, 99] },
+            { id: 'invalid', shapeIndices: [-1, 99] },
+          ],
+        },
+      }],
+    })
+
+    expect(migrated.customPatterns?.[0].editor).toEqual({
+      version: 1,
+      gridDivisions: 12,
+      groups: [{ id: 'pair', shapeIndices: [0, 1] }],
+    })
+  })
+
   it('inserts, removes and independently resizes rows and columns without moving survivors', () => {
     const original = {
       ...createDocument(2, 2),

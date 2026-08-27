@@ -19,6 +19,17 @@ export interface PatternShape {
   points: readonly Point[]
 }
 
+export interface BlockEditorGroup {
+  id: string
+  shapeIndices: readonly number[]
+}
+
+export interface BlockEditorData {
+  version: 1
+  gridDivisions: number
+  groups: readonly BlockEditorGroup[]
+}
+
 export interface BlockPattern {
   id: PatternId
   name: string
@@ -26,6 +37,9 @@ export interface BlockPattern {
   shapes: readonly PatternShape[]
   source?: 'custom' | 'imported'
   unsupportedReason?: string
+  editor?: BlockEditorData
+  widthCm?: number
+  heightCm?: number
 }
 
 export interface QuiltCell {
@@ -161,6 +175,17 @@ const clonePattern = (pattern: BlockPattern): BlockPattern => ({
     ...shape,
     points: shape.points.map(([x, y]) => [x, y] as const),
   })),
+  ...(pattern.editor
+    ? {
+        editor: {
+          ...pattern.editor,
+          groups: pattern.editor.groups.map((group) => ({
+            ...group,
+            shapeIndices: [...group.shapeIndices],
+          })),
+        },
+      }
+    : {}),
 })
 
 export function createDocument(rows = 5, columns = 6): QuiltDocument {
@@ -242,6 +267,27 @@ export function migrateDocument(input: unknown): QuiltDocument {
           : [])
       return points.length >= 3 ? [{ color: shape.color as number, points }] : []
     })
+    const rawEditor = pattern.editor && typeof pattern.editor === 'object'
+      ? pattern.editor as Record<string, unknown>
+      : undefined
+    const rawGroups = rawEditor && Array.isArray(rawEditor.groups) ? rawEditor.groups : []
+    const editorGroups = rawGroups.flatMap((rawGroup): BlockEditorGroup[] => {
+      if (!rawGroup || typeof rawGroup !== 'object') return []
+      const group = rawGroup as Record<string, unknown>
+      if (typeof group.id !== 'string' || !group.id || !Array.isArray(group.shapeIndices)) return []
+      const shapeIndices = [...new Set(group.shapeIndices.filter((value): value is number =>
+        typeof value === 'number'
+        && Number.isInteger(value)
+        && value >= 0
+        && value < shapes.length))]
+      return shapeIndices.length > 0 ? [{ id: group.id, shapeIndices }] : []
+    })
+    const gridDivisions = rawEditor && typeof rawEditor.gridDivisions === 'number'
+      && Number.isInteger(rawEditor.gridDivisions)
+      && rawEditor.gridDivisions >= 1
+      && rawEditor.gridDivisions <= 32
+      ? rawEditor.gridDivisions
+      : 8
     return [{
       id: pattern.id,
       name: typeof pattern.name === 'string' && pattern.name ? pattern.name : pattern.id,
@@ -250,6 +296,21 @@ export function migrateDocument(input: unknown): QuiltDocument {
       source: pattern.source === 'imported' ? 'imported' : 'custom',
       ...(typeof pattern.unsupportedReason === 'string' && pattern.unsupportedReason
         ? { unsupportedReason: pattern.unsupportedReason }
+        : {}),
+      ...(rawEditor
+        ? {
+            editor: {
+              version: 1,
+              gridDivisions,
+              groups: editorGroups,
+            } satisfies BlockEditorData,
+          }
+        : {}),
+      ...(typeof pattern.widthCm === 'number' && Number.isFinite(pattern.widthCm) && pattern.widthCm > 0
+        ? { widthCm: pattern.widthCm }
+        : {}),
+      ...(typeof pattern.heightCm === 'number' && Number.isFinite(pattern.heightCm) && pattern.heightCm > 0
+        ? { heightCm: pattern.heightCm }
         : {}),
     }]
   })
