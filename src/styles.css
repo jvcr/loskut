@@ -52,6 +52,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .document-name:hover { border-color: var(--line); }
 .document-name:focus { background: #faf9fc; border-color: #c9c3dc; outline: none; }
 .topbar-actions { min-width: 0; margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.preference-switches { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; }
+.segmented-switch { height: 44px; padding: 1px; display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 9px; background: #f5f3f8; }
+.segmented-switch button { width: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #777181; font-size: var(--text-meta); font-weight: 800; cursor: pointer; }
+.segmented-switch button:hover { color: var(--purple); }
+.segmented-switch button.active { background: #fff; color: var(--purple); box-shadow: 0 1px 4px rgba(31,25,47,.13); }
+.segmented-switch button:focus-visible { outline: 3px solid rgba(124,92,255,.22); outline-offset: 1px; }
 .icon-button, .mini-button { border: 0; background: transparent; cursor: pointer; border-radius: 8px; }
 .icon-button { width: var(--control-height); height: var(--control-height); font-size: 21px; }
 .icon-button:hover, .mini-button:hover { background: #f1eff6; }
@@ -64,7 +70,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .save-status { color: #8d8797; font-size: var(--text-meta); font-weight: 600; white-space: nowrap; }
 .avatar { width: var(--control-height); height: var(--control-height); margin-left: var(--space-1); border: 0; border-radius: 50%; background: #ffe1ba; color: #6b3d08; font-size: var(--text-ui); font-weight: 800; cursor: pointer; }
 
-.workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: 96px 340px minmax(0, 1fr); }
+.workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: 96px 380px minmax(0, 1fr); }
 .workspace.calculator-active { grid-template-columns: 96px minmax(0, 1fr); }
 .workspace.calculator-active .side-panel {
   padding: 36px 48px 64px;
@@ -199,11 +205,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .brand { min-width: 40px; }
   .brand > span:last-child { display: none; }
   .document-name { width: 150px; }
-  .topbar-actions { gap: var(--space-1); }
+  .topbar-actions { gap: var(--space-1); overflow-x: auto; scrollbar-width: none; }
+  .topbar-actions::-webkit-scrollbar { display: none; }
+  .preference-switches { gap: var(--space-1); }
   .secondary-button { padding-right: var(--space-2); padding-left: var(--space-2); font-size: var(--text-ui); }
   .primary-button { padding-right: var(--space-3); padding-left: var(--space-3); }
   .save-status { display: none; }
-  .workspace { grid-template-columns: 90px 320px minmax(0, 1fr); }
+  .workspace { grid-template-columns: 90px 350px minmax(0, 1fr); }
   .workspace.calculator-active { grid-template-columns: 90px minmax(0, 1fr); }
   .workspace.calculator-active .side-panel {
     padding-right: 40px;

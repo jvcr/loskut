@@ -33,9 +33,10 @@ import { BlockEditorModal } from './BlockEditorModal'
 import { FabricCalculatorPanel } from './FabricCalculatorPanel'
 import { PATTERN_CATEGORY_BY_ID } from './standardPatterns'
 import { PrintBlockModal } from './PrintBlockModal'
+import { usePreferences } from './i18n'
 
 type PanelId = 'blocks' | 'colors' | 'grid' | 'calculator'
-type PatternCategory = 'Все' | 'Базовые' | 'Звёзды' | 'Треугольники' | 'Классика'
+type PatternCategory = 'all' | 'basic' | 'stars' | 'triangles' | 'classic'
 type Tool = 'select' | 'paint' | 'eyedropper' | 'pan'
 
 interface HistoryState {
@@ -68,14 +69,20 @@ function historyReducer(state: HistoryState, action: HistoryAction): HistoryStat
   return { past: [], present: action.next, future: [] }
 }
 
-const PANEL_LABELS: Record<PanelId, string> = {
-  blocks: 'Блоки',
-  colors: 'Цвета',
-  grid: 'Размер',
-  calculator: 'Расход',
+const PATTERN_CATEGORIES: readonly PatternCategory[] = ['all', 'basic', 'stars', 'triangles', 'classic']
+const PATTERN_CATEGORY_NAMES: Record<Exclude<PatternCategory, 'all'>, string> = {
+  basic: 'Базовые',
+  stars: 'Звёзды',
+  triangles: 'Треугольники',
+  classic: 'Классика',
 }
 
-const COLOR_NAMES = ['Фон', 'Акцент', 'Контраст', 'Дополнительный']
+const COLOR_NAMES = [
+  ['Фон', 'Background'],
+  ['Акцент', 'Accent'],
+  ['Контраст', 'Contrast'],
+  ['Дополнительный', 'Secondary'],
+] as const
 const RANDOM_COLORS = ['#ef476f', '#7c5cff', '#0f9f92', '#ff9f1c', '#2176ff', '#8338ec', '#e63946', '#2a9d8f']
 
 const LOCAL_DOCUMENT_KEY = 'loskut.editor.document.v2'
@@ -157,12 +164,25 @@ export interface EditorPageProps {
 
 
 export default function EditorPage({ initialDocument, onBack, onSave, onSaveBlock }: EditorPageProps) {
+  const {
+    language,
+    measurementSystem,
+    setLanguage,
+    setMeasurementSystem,
+    text,
+    patternName,
+    lengthUnit,
+    toDisplayLength,
+    fromDisplayLength,
+    formatLength,
+    formatFabricLength,
+  } = usePreferences()
   const [history, dispatch] = useReducer(historyReducer, initialDocument, (document) => ({
     past: [],
     present: loadLocalDocument(document),
     future: [],
   }))
-  const [patternCategory, setPatternCategory] = useState<PatternCategory>('Все')
+  const [patternCategory, setPatternCategory] = useState<PatternCategory>('all')
   const document = history.present
   const [activePanel, setActivePanel] = useState<PanelId>('blocks')
   const [tool, setTool] = useState<Tool>('paint')
@@ -194,9 +214,9 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   const selectedIndices = useMemo(() => [...selectedCells].filter((index) => index < document.cells.length), [document.cells.length, selectedCells])
   const estimate = useMemo(() => calculateQuilt(document), [document])
   const patterns = useMemo(() => [...PATTERNS, ...(document.customPatterns ?? [])], [document.customPatterns])
-  const visiblePatterns = useMemo(() => patternCategory === 'Все'
+  const visiblePatterns = useMemo(() => patternCategory === 'all'
     ? patterns
-    : patterns.filter((pattern) => (PATTERN_CATEGORY_BY_ID[pattern.id] ?? 'Базовые') === patternCategory),
+    : patterns.filter((pattern) => (PATTERN_CATEGORY_BY_ID[pattern.id] ?? 'Базовые') === PATTERN_CATEGORY_NAMES[patternCategory]),
   [patternCategory, patterns])
   const editingFabricSource = editingFabricIndex === null ? null : document.fabricFills?.[editingFabricIndex] ?? null
   const editingFabricPlacement = editingFabricIndex === null
@@ -211,6 +231,15 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   const applyPattern = useCallback((index: number) => {
     commit((current) => updateCells(current, [index], (cell) => ({ ...cell, patternId: activePattern })))
   }, [activePattern, commit])
+  const choosePattern = useCallback((patternId: PatternId) => {
+    setActivePattern(patternId)
+    setTool('paint')
+    if (selectedIndices.length === 0) return
+    commit((current) => updateCells(current, selectedIndices, (cell) => ({ ...cell, patternId })))
+    flash(language === 'ru'
+      ? `Блок применён к выделенным ячейкам: ${selectedIndices.length}`
+      : `Pattern applied to selected cells: ${selectedIndices.length}`)
+  }, [commit, flash, language, selectedIndices])
 
   const rotateSelection = useCallback(() => {
     if (selectedIndices.length === 0) return
@@ -271,7 +300,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   const mergeSelection = () => {
     const next = mergeCells(document, selectedIndices)
     if (next === document) {
-      flash('Для объединения выделите прямоугольную область')
+      flash(text('Для объединения выделите прямоугольную область', 'Select a rectangular area to merge'))
       return
     }
     commit(next)
@@ -297,18 +326,29 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   }
 
   const cloneActiveBlock = () => {
+    const source = patternById(activePattern, document.customPatterns)
     const next = cloneCustomPattern(document, activePattern)
     const clone = next.customPatterns?.at(-1)
-    commit(next)
-    if (clone) {
-      setActivePattern(clone.id)
-      flash('Копия блока создана')
+    if (!clone) {
+      commit(next)
+      return
     }
+    const localizedSourceName = patternName(source.id, source.name)
+    const localizedCloneName = text(`${localizedSourceName} — копия`, `${localizedSourceName} — copy`)
+    const localizedDocument = {
+      ...next,
+      customPatterns: next.customPatterns?.map((pattern) => pattern.id === clone.id
+        ? { ...pattern, name: localizedCloneName }
+        : pattern),
+    }
+    commit(localizedDocument)
+    setActivePattern(clone.id)
+    flash(text('Копия блока создана', 'Block copy created'))
   }
 
   const changeSelectedTrack = (action: 'insert-before' | 'insert-after' | 'remove' | 'resize') => {
     if (!selectedHeader) {
-      flash('Сначала выберите заголовок ряда или столбца')
+      flash(text('Сначала выберите заголовок ряда или столбца', 'Select a row or column header first'))
       return
     }
     const { kind, index } = selectedHeader
@@ -316,19 +356,26 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       const currentSize = kind === 'row'
         ? document.rowSizesCm?.[index] ?? document.blockSizeCm
         : document.columnSizesCm?.[index] ?? document.blockSizeCm
-      const entered = window.prompt('Новый размер, см', String(currentSize))
+      const entered = window.prompt(
+        text(`Новый размер, ${lengthUnit}`, `New size, ${lengthUnit}`),
+        String(toDisplayLength(currentSize)),
+      )
       if (entered === null) return
-      const size = Number(entered)
-      if (!Number.isFinite(size) || size < 0.5 || size > 200) {
-        flash('Введите размер от 0,5 до 200 см')
+      const displaySize = Number(entered)
+      const sizeCm = fromDisplayLength(displaySize)
+      if (!Number.isFinite(sizeCm) || sizeCm < 0.5 || sizeCm > 200) {
+        flash(text(
+          `Введите размер от ${formatLength(0.5)} до ${formatLength(200)}`,
+          `Enter a size from ${formatLength(0.5)} to ${formatLength(200)}`,
+        ))
         return
       }
-      commit((current) => kind === 'row' ? resizeRow(current, index, size) : resizeColumn(current, index, size))
+      commit((current) => kind === 'row' ? resizeRow(current, index, sizeCm) : resizeColumn(current, index, sizeCm))
       return
     }
     if (action === 'remove') {
       if ((kind === 'row' ? document.rows : document.columns) <= 1) {
-        flash('Нельзя удалить последний ряд или столбец')
+        flash(text('Нельзя удалить последний ряд или столбец', 'The last row or column cannot be removed'))
         return
       }
       commit((current) => kind === 'row' ? removeRow(current, index) : removeColumn(current, index))
@@ -350,8 +397,8 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
     const cell = document.cells[selectedIndices[0]]
     if (!cell) return
     copiedCell.current = { ...cell }
-    flash('Блок скопирован')
-  }, [document.cells, flash, selectedIndices])
+    flash(text('Блок скопирован', 'Block copied'))
+  }, [document.cells, flash, selectedIndices, text])
 
   const pasteSelection = useCallback(() => {
     const cell = copiedCell.current
@@ -406,11 +453,11 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
         setLastSavedAt(new Date())
         onSave?.(document)
       } catch {
-        flash('Автосохранение не поместилось в хранилище')
+        flash(text('Автосохранение не поместилось в хранилище', 'Autosave did not fit in local storage'))
       }
     }, 500)
     return () => window.clearTimeout(timeout)
-  }, [autosave, document, flash, onSave])
+  }, [autosave, document, flash, onSave, text])
 
   const exportPng = async (showGrid = document.showGrid ?? true, maxDimension = 1800, suffix = '') => {
     const columnSizes = document.columnSizesCm ?? Array.from({ length: document.columns }, () => document.blockSizeCm)
@@ -447,10 +494,10 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       drawPattern(context, cell, document.palette, fabricImages, document.fabricPlacements ?? [], document.customPatterns ?? [], xPositions[column], yPositions[row], width, height, showGrid)
     })
     const link = window.document.createElement('a')
-    link.download = `${document.name.trim() || 'квилт'}${suffix}.png`
+    link.download = `${document.name.trim() || text('квилт', 'quilt')}${suffix}.png`
     link.href = canvas.toDataURL('image/png')
     link.click()
-    flash('PNG сохранён')
+    flash(text('PNG сохранён', 'PNG saved'))
   }
 
   const randomize = () => {
@@ -526,13 +573,13 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
           ...current,
           palette: current.palette.map((color, index) => colors[index] ?? color),
         }))
-        flash('Палитра извлечена из изображения')
+        flash(text('Палитра извлечена из изображения', 'Palette extracted from image'))
       }
       URL.revokeObjectURL(objectUrl)
     }
     image.onerror = () => {
       URL.revokeObjectURL(objectUrl)
-      flash('Не удалось прочитать изображение')
+      flash(text('Не удалось прочитать изображение', 'Could not read the image'))
     }
     image.src = objectUrl
   }
@@ -562,11 +609,11 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       })
       URL.revokeObjectURL(objectUrl)
       setEditingFabricIndex(paletteIndex)
-      flash('Ткань добавлена к цвету')
+      flash(text('Ткань добавлена к цвету', 'Fabric added to the color'))
     }
     image.onerror = () => {
       URL.revokeObjectURL(objectUrl)
-      flash('Не удалось прочитать ткань')
+      flash(text('Не удалось прочитать ткань', 'Could not read the fabric image'))
     }
     image.src = objectUrl
   }
@@ -584,7 +631,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   const duplicateFabricFragment = (sourceIndex: number) => {
     const targetIndex = (document.fabricFills ?? []).findIndex((fill, index) => index !== sourceIndex && !fill)
     if (targetIndex < 0) {
-      flash('Для нового фрагмента нужен свободный цвет палитры')
+      flash(text('Для нового фрагмента нужен свободный цвет палитры', 'A free palette color is needed for a new fragment'))
       return
     }
     commit((current) => {
@@ -600,7 +647,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       }
     })
     setEditingFabricIndex(targetIndex)
-    flash(`Создан независимый фрагмент для цвета ${targetIndex + 1}`)
+    flash(text(`Создан независимый фрагмент для цвета ${targetIndex + 1}`, `Independent fragment created for color ${targetIndex + 1}`))
   }
 
   const togglePaletteLock = (index: number) => {
@@ -618,20 +665,20 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       window.localStorage.setItem(LOCAL_DOCUMENT_KEY, JSON.stringify(document))
       setLastSavedAt(new Date())
       onSave?.(document)
-      flash('Проект сохранён локально')
+      flash(text('Проект сохранён локально', 'Project saved locally'))
     } catch {
-      flash('Проект слишком большой для локального хранилища — экспортируйте файл')
+      flash(text('Проект слишком большой для локального хранилища — экспортируйте файл', 'The project is too large for local storage — export it to a file'))
     }
   }
 
   const exportProject = () => {
     const blob = new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' })
     const link = window.document.createElement('a')
-    link.download = `${document.name.trim() || 'квилт'}.quilt.json`
+    link.download = `${document.name.trim() || text('квилт', 'quilt')}.quilt.json`
     link.href = URL.createObjectURL(blob)
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(link.href), 0)
-    flash('Файл проекта сохранён')
+    flash(text('Файл проекта сохранён', 'Project file saved'))
   }
 
   const importProject = async (file: File) => {
@@ -646,9 +693,9 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
       if (!valid) throw new Error('invalid document')
       dispatch({ type: 'reset', next: migrateDocument(parsed) })
       setSelectedCells(new Set())
-      flash('Проект импортирован')
+      flash(text('Проект импортирован', 'Project imported'))
     } catch {
-      flash('Не удалось прочитать проект')
+      flash(text('Не удалось прочитать проект', 'Could not read the project'))
     } finally {
       if (importInput.current) importInput.current.value = ''
     }
@@ -659,7 +706,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
     if (event.altKey || tool === 'eyedropper') {
       setActivePattern(document.cells[index].patternId)
       setTool('paint')
-      flash('Образец выбран')
+      flash(text('Образец выбран', 'Sample selected'))
       return
     }
     if (tool === 'paint') {
@@ -681,31 +728,41 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand" aria-label="Лоскут">
+        <div className="brand" aria-label={text('Лоскут', 'Loskut')}>
           <span className="brand-mark"><i /><i /><i /><i /></span>
-          <span>Лоскут</span>
+          <span>{text('Лоскут', 'Loskut')}</span>
         </div>
         <input
           className="document-name"
-          aria-label="Название проекта"
+          aria-label={text('Название проекта', 'Project name')}
           value={document.name}
           onChange={(event) => commit((current) => ({ ...current, name: event.target.value }))}
         />
+        <div className="preference-switches">
+          <div className="segmented-switch" role="group" aria-label={text('Язык', 'Language')}>
+            <button type="button" aria-pressed={language === 'ru'} className={language === 'ru' ? 'active' : ''} onClick={() => setLanguage('ru')}>RU</button>
+            <button type="button" aria-pressed={language === 'en'} className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>EN</button>
+          </div>
+          <div className="segmented-switch" role="group" aria-label={text('Единицы измерения', 'Measurement units')}>
+            <button type="button" aria-pressed={measurementSystem === 'metric'} className={measurementSystem === 'metric' ? 'active' : ''} onClick={() => setMeasurementSystem('metric')}>cm</button>
+            <button type="button" aria-pressed={measurementSystem === 'imperial'} className={measurementSystem === 'imperial' ? 'active' : ''} onClick={() => setMeasurementSystem('imperial')}>in</button>
+          </div>
+        </div>
         <div className="topbar-actions">
-          <button className="icon-button" onClick={() => dispatch({ type: 'undo' })} disabled={!history.past.length} title="Отменить (⌘Z)">↶</button>
-          <button className="icon-button" onClick={() => dispatch({ type: 'redo' })} disabled={!history.future.length} title="Повторить (⇧⌘Z)">↷</button>
-          <button className="secondary-button" onClick={() => importInput.current?.click()}>Импорт</button>
-          <button className="secondary-button" onClick={exportProject}>Файл проекта</button>
-          <button className="secondary-button" onClick={saveCurrent}>Сохранить</button>
-          <button className="secondary-button" onClick={() => void exportPng(false, 360, '-thumbnail')}>Миниатюра</button>
-          <button className="primary-button" onClick={() => exportPng()}><span>↓</span> Скачать PNG</button>
+          <button className="icon-button" onClick={() => dispatch({ type: 'undo' })} disabled={!history.past.length} title={text('Отменить (⌘Z)', 'Undo (⌘Z)')}>↶</button>
+          <button className="icon-button" onClick={() => dispatch({ type: 'redo' })} disabled={!history.future.length} title={text('Повторить (⇧⌘Z)', 'Redo (⇧⌘Z)')}>↷</button>
+          <button className="secondary-button" onClick={() => importInput.current?.click()}>{text('Импорт', 'Import')}</button>
+          <button className="secondary-button" onClick={exportProject}>{text('Файл проекта', 'Project file')}</button>
+          <button className="secondary-button" onClick={saveCurrent}>{text('Сохранить', 'Save')}</button>
+          <button className="secondary-button" onClick={() => void exportPng(false, 360, text('-миниатюра', '-thumbnail'))}>{text('Миниатюра', 'Thumbnail')}</button>
+          <button className="primary-button" onClick={() => exportPng()}><span>↓</span> {text('Скачать PNG', 'Download PNG')}</button>
           <input ref={importInput} className="visually-hidden" tabIndex={-1} aria-hidden="true" type="file" accept=".json,application/json" onChange={(event) => event.target.files?.[0] && void importProject(event.target.files[0])} />
-          {lastSavedAt && <span className="save-status">Сохранено {lastSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>}
+          {lastSavedAt && <span className="save-status">{text('Сохранено', 'Saved')} {lastSavedAt.toLocaleTimeString(language === 'ru' ? 'ru-RU' : 'en-US', { hour: '2-digit', minute: '2-digit' })}</span>}
         </div>
       </header>
 
       <section className={activePanel === 'calculator' ? 'workspace calculator-active' : 'workspace'}>
-        <nav className="rail" aria-label="Разделы редактора">
+        <nav className="rail" aria-label={text('Разделы редактора', 'Editor sections')}>
           {(['blocks', 'colors', 'grid', 'calculator'] as const).map((panel) => (
             <button
               key={panel}
@@ -713,7 +770,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
               onClick={() => setActivePanel(panel)}
             >
               <span className="rail-icon">{panel === 'blocks' ? '◆' : panel === 'colors' ? '●' : panel === 'grid' ? '▦' : '∑'}</span>
-              {PANEL_LABELS[panel]}
+              {panel === 'blocks' ? text('Блоки', 'Blocks') : panel === 'colors' ? text('Цвета', 'Colors') : panel === 'grid' ? text('Размер', 'Size') : text('Расход', 'Fabric')}
             </button>
           ))}
         </nav>
@@ -722,13 +779,15 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
           {activePanel === 'blocks' && (
             <>
               <div className="panel-heading">
-                <div><p className="eyebrow">Библиотека</p><h1>Блоки квилта</h1></div>
-                <button className="mini-button" onClick={randomize} title="Случайный дизайн">✦</button>
+                <div><p className="eyebrow">{text('Библиотека', 'Library')}</p><h1>{text('Блоки квилта', 'Quilt blocks')}</h1></div>
+                <button className="mini-button" onClick={randomize} title={text('Случайный дизайн', 'Random design')}>✦</button>
               </div>
-              <p className="panel-copy">Выберите блок и рисуйте им прямо по макету.</p>
-              <div className="pattern-categories" role="tablist" aria-label="Категории блоков">
-                {(['Все', 'Базовые', 'Звёзды', 'Треугольники', 'Классика'] as const).map((category) => (
-                  <button key={category} role="tab" aria-selected={patternCategory === category} className={patternCategory === category ? 'active' : ''} onClick={() => setPatternCategory(category)}>{category}</button>
+              <p className="panel-copy">{text('Выберите блок и рисуйте им прямо по макету.', 'Choose a block and paint it directly onto the layout.')}</p>
+              <div className="pattern-categories" role="tablist" aria-label={text('Категории блоков', 'Block categories')}>
+                {PATTERN_CATEGORIES.map((category) => (
+                  <button key={category} role="tab" aria-selected={patternCategory === category} className={patternCategory === category ? 'active' : ''} onClick={() => setPatternCategory(category)}>
+                    {category === 'all' ? text('Все', 'All') : category === 'basic' ? text('Базовые', 'Basic') : category === 'stars' ? text('Звёзды', 'Stars') : category === 'triangles' ? text('Треугольники', 'Triangles') : text('Классика', 'Classic')}
+                  </button>
                 ))}
               </div>
               <div className="pattern-grid">
@@ -736,40 +795,44 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                   <button
                     key={pattern.id}
                     className={activePattern === pattern.id && tool === 'paint' ? 'pattern-card active' : 'pattern-card'}
-                    onClick={() => { setActivePattern(pattern.id); setTool('paint') }}
+                    onClick={() => choosePattern(pattern.id)}
+                    aria-label={text(`Применить блок «${patternName(pattern.id, pattern.name)}» к выделенным ячейкам`, `Apply “${patternName(pattern.id, pattern.name)}” to selected cells`)}
                   >
                     <PatternPreview patternId={pattern.id} palette={document.palette} patterns={document.customPatterns} fabricFills={document.fabricFills} fabricPlacements={document.fabricPlacements} className="pattern-thumbnail" />
-                    <span>{pattern.name}</span>
+                    <span>{patternName(pattern.id, pattern.name)}</span>
                   </button>
                 ))}
               </div>
               <div className="block-actions">
-                <button onClick={() => setBlockEditor('new')}>＋ Новый блок</button>
-                <button onClick={() => setBlockEditor(patternById(activePattern, document.customPatterns))}>✎ Редактировать копию</button>
-                <button onClick={cloneActiveBlock}>⧉ Клонировать</button>
-                <button onClick={() => setPrintPattern(patternById(activePattern, document.customPatterns))}>⌘ Шаблон печати</button>
+                <button onClick={() => setBlockEditor('new')}>＋ {text('Новый блок', 'New block')}</button>
+                <button onClick={() => setBlockEditor(patternById(activePattern, document.customPatterns))}>✎ {text('Редактировать копию', 'Edit a copy')}</button>
+                <button onClick={cloneActiveBlock}>⧉ {text('Клонировать', 'Clone')}</button>
+                <button onClick={() => setPrintPattern(patternById(activePattern, document.customPatterns))}>⌘ {text('Шаблон печати', 'Print template')}</button>
               </div>
-              <div className="tip"><b>Совет</b><span>Зажмите Alt и нажмите на блок, чтобы взять его как образец.</span></div>
+              <div className="tip"><b>{text('Совет', 'Tip')}</b><span>{text('Зажмите Alt и нажмите на блок, чтобы взять его как образец.', 'Hold Alt and click a block to sample it.')}</span></div>
             </>
           )}
 
           {activePanel === 'colors' && (
             <>
               <div className="panel-heading">
-                <div><p className="eyebrow">Глобальная палитра</p><h1>Цвета</h1></div>
-                <button className="mini-button" onClick={randomizeColors} title="Новая палитра">✦</button>
+                <div><p className="eyebrow">{text('Глобальная палитра', 'Global palette')}</p><h1>{text('Цвета', 'Colors')}</h1></div>
+                <button className="mini-button" onClick={randomizeColors} title={text('Новая палитра', 'New palette')}>✦</button>
               </div>
-              <p className="panel-copy">Изменение цвета сразу обновит весь макет.</p>
+              <p className="panel-copy">{text('Изменение цвета сразу обновит весь макет.', 'Changing a color updates the entire layout immediately.')}</p>
               <div className="color-list">
                 {document.palette.map((color, index) => {
                   const locked = document.paletteLocks?.[index] ?? false
                   const fabric = document.fabricFills?.[index]
+                  const colorLabel = COLOR_NAMES[index]
+                    ? text(COLOR_NAMES[index][0], COLOR_NAMES[index][1])
+                    : text(`Цвет ${index + 1}`, `Color ${index + 1}`)
                   return (
                     <div className="color-row" key={index}>
                       <label className="color-picker-label">
-                        <input type="color" value={color} onChange={(event) => setPaletteColor(index, event.target.value)} />
+                        <input type="color" value={color} onChange={(event) => setPaletteColor(index, event.target.value)} aria-label={text(`Выбрать ${colorLabel.toLowerCase()}`, `Choose ${colorLabel.toLowerCase()}`)} />
                         <span className="color-chip" style={{ backgroundColor: color, backgroundImage: fabric ? `url(${fabric})` : undefined }} />
-                        <span><b>{COLOR_NAMES[index] ?? `Цвет ${index + 1}`}</b><small>{fabric ? 'Ткань · ' : ''}{color.toUpperCase()}</small></span>
+                        <span><b>{colorLabel}</b><small>{fabric ? `${text('Ткань', 'Fabric')} · ` : ''}{color.toUpperCase()}</small></span>
                       </label>
                       <button className={fabric ? 'lock-button active' : 'lock-button'} onClick={() => {
                         if (fabric) {
@@ -778,8 +841,8 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                           fabricTarget.current = index
                           fabricImageInput.current?.click()
                         }
-                      }} aria-label={fabric ? `Настроить фрагмент ткани ${index + 1}` : `Добавить ткань ${index + 1}`}>▧</button>
-                      <button className={locked ? 'lock-button active' : 'lock-button'} onClick={() => togglePaletteLock(index)} aria-label={locked ? `Разблокировать цвет ${index + 1}` : `Зафиксировать цвет ${index + 1}`}>{locked ? '●' : '○'}</button>
+                      }} aria-label={fabric ? text(`Настроить фрагмент ткани ${index + 1}`, `Adjust fabric fragment ${index + 1}`) : text(`Добавить ткань ${index + 1}`, `Add fabric ${index + 1}`)}>▧</button>
+                      <button className={locked ? 'lock-button active' : 'lock-button'} onClick={() => togglePaletteLock(index)} aria-label={locked ? text(`Разблокировать цвет ${index + 1}`, `Unlock color ${index + 1}`) : text(`Зафиксировать цвет ${index + 1}`, `Lock color ${index + 1}`)}>{locked ? '●' : '○'}</button>
                     </div>
                   )
                 })}
@@ -788,6 +851,8 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                 <div className="fabric-crop-editor">
                   <div
                     className="fabric-crop-preview"
+                    role="img"
+                    aria-label={text(`Предпросмотр фрагмента ткани для цвета ${editingFabricIndex + 1}`, `Fabric fragment preview for color ${editingFabricIndex + 1}`)}
                     style={{
                       backgroundImage: `url(${editingFabricSource})`,
                       backgroundSize: `${editingFabricPlacement.zoom * 100}%`,
@@ -795,33 +860,33 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                     }}
                   />
                   <div className="fabric-crop-heading">
-                    <b>Фрагмент для цвета {editingFabricIndex + 1}</b>
-                    <button onClick={() => setEditingFabricIndex(null)} aria-label="Закрыть настройку фрагмента">×</button>
+                    <b>{text(`Фрагмент для цвета ${editingFabricIndex + 1}`, `Fragment for color ${editingFabricIndex + 1}`)}</b>
+                    <button onClick={() => setEditingFabricIndex(null)} aria-label={text('Закрыть настройку фрагмента', 'Close fragment settings')}>×</button>
                   </div>
-                  <label>Масштаб
+                  <label>{text('Масштаб', 'Scale')}
                     <input type="range" min="1" max="4" step="0.05" value={editingFabricPlacement.zoom} onChange={(event) => updateFabricPlacement(editingFabricIndex, { zoom: Number(event.target.value) })} />
                   </label>
-                  <label>По горизонтали
+                  <label>{text('По горизонтали', 'Horizontal')}
                     <input type="range" min="0" max="100" value={editingFabricPlacement.positionX} onChange={(event) => updateFabricPlacement(editingFabricIndex, { positionX: Number(event.target.value) })} />
                   </label>
-                  <label>По вертикали
+                  <label>{text('По вертикали', 'Vertical')}
                     <input type="range" min="0" max="100" value={editingFabricPlacement.positionY} onChange={(event) => updateFabricPlacement(editingFabricIndex, { positionY: Number(event.target.value) })} />
                   </label>
                   <div className="fabric-crop-actions">
-                    <button onClick={() => duplicateFabricFragment(editingFabricIndex)}>＋ Другой кусочек этой ткани</button>
+                    <button onClick={() => duplicateFabricFragment(editingFabricIndex)}>＋ {text('Другой кусочек этой ткани', 'Another piece of this fabric')}</button>
                     <button onClick={() => {
                       commit((current) => ({
                         ...current,
                         fabricFills: (current.fabricFills ?? []).map((fill, index) => index === editingFabricIndex ? null : fill),
                       }))
                       setEditingFabricIndex(null)
-                    }}>Удалить ткань</button>
+                    }}>{text('Удалить ткань', 'Remove fabric')}</button>
                   </div>
                 </div>
               )}
-              <button className="wide-secondary" onClick={randomizeColors}>✦ Создать новую палитру</button>
-              <button className="wide-secondary" onClick={createOmbrePalette}>◒ Омбре между крайними цветами</button>
-              <button className="wide-secondary" onClick={() => paletteImageInput.current?.click()}>▧ Палитра из изображения</button>
+              <button className="wide-secondary" onClick={randomizeColors}>✦ {text('Создать новую палитру', 'Create a new palette')}</button>
+              <button className="wide-secondary" onClick={createOmbrePalette}>◒ {text('Омбре между крайними цветами', 'Ombre between edge colors')}</button>
+              <button className="wide-secondary" onClick={() => paletteImageInput.current?.click()}>▧ {text('Палитра из изображения', 'Palette from image')}</button>
               <input ref={paletteImageInput} className="visually-hidden" tabIndex={-1} aria-hidden="true" type="file" accept="image/*" onChange={(event) => {
                 const file = event.target.files?.[0]
                 if (file) extractPaletteFromImage(file)
@@ -837,20 +902,20 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
 
           {activePanel === 'grid' && (
             <>
-              <div className="panel-heading"><div><p className="eyebrow">Параметры</p><h1>Макет квилта</h1></div></div>
-              <label className="select-field">Тип сетки
+              <div className="panel-heading"><div><p className="eyebrow">{text('Параметры', 'Settings')}</p><h1>{text('Макет квилта', 'Quilt layout')}</h1></div></div>
+              <label className="select-field">{text('Тип сетки', 'Grid type')}
                 <select value={document.gridType ?? 'rectangle'} onChange={(event) => commit((current) => ({ ...current, gridType: event.target.value as QuiltDocument['gridType'] }))}>
-                  <option value="rectangle">Прямоугольная</option>
-                  <option value="on-point">По диагонали</option>
-                  <option value="triangle">Треугольная</option>
-                  <option value="free">Свободное размещение</option>
+                  <option value="rectangle">{text('Прямоугольная', 'Rectangular')}</option>
+                  <option value="on-point">{text('По диагонали', 'On point')}</option>
+                  <option value="triangle">{text('Треугольная', 'Triangular')}</option>
+                  <option value="free">{text('Свободное размещение', 'Free placement')}</option>
                 </select>
               </label>
               <div className="field-grid">
-                <label>Столбцы<input type="number" min="1" max="50" value={document.columns} onChange={(event) => commit((current) => resizeDocument(current, current.rows, Number(event.target.value)))} /></label>
-                <label>Ряды<input type="number" min="1" max="50" value={document.rows} onChange={(event) => commit((current) => resizeDocument(current, Number(event.target.value), current.columns))} /></label>
-                <label>Блок, см<input type="number" min="0.5" max="200" step="0.5" value={document.blockSizeCm} onChange={(event) => {
-                  const blockSizeCm = Math.max(0.5, Number(event.target.value))
+                <label>{text('Столбцы', 'Columns')}<input type="number" min="1" max="50" value={document.columns} onChange={(event) => commit((current) => resizeDocument(current, current.rows, Number(event.target.value)))} /></label>
+                <label>{text('Ряды', 'Rows')}<input type="number" min="1" max="50" value={document.rows} onChange={(event) => commit((current) => resizeDocument(current, Number(event.target.value), current.columns))} /></label>
+                <label>{text('Блок', 'Block')}, {lengthUnit}<input type="number" min={toDisplayLength(0.5)} max={toDisplayLength(200)} step={measurementSystem === 'metric' ? 0.5 : 0.25} value={toDisplayLength(document.blockSizeCm)} onChange={(event) => {
+                  const blockSizeCm = Math.min(200, Math.max(0.5, fromDisplayLength(Number(event.target.value))))
                   commit((current) => ({
                     ...current,
                     blockSizeCm,
@@ -858,43 +923,45 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                     columnSizesCm: current.columnSizesCm?.map(() => blockSizeCm),
                   }))
                 }} /></label>
-                <label>Припуск, см<input type="number" min="0" max="3" step="0.1" value={document.seamAllowanceCm} onChange={(event) => commit((current) => ({ ...current, seamAllowanceCm: Math.max(0, Number(event.target.value)) }))} /></label>
-                <label>Ширина ткани, см<input type="number" min="40" max="300" value={document.fabricWidthCm ?? 110} onChange={(event) => commit((current) => ({ ...current, fabricWidthCm: Math.max(40, Number(event.target.value)) }))} /></label>
-                <label>Запас изнанки, см<input type="number" min="0" max="100" value={document.backingExtraCm ?? 10} onChange={(event) => commit((current) => ({ ...current, backingExtraCm: Math.max(0, Number(event.target.value)) }))} /></label>
-                <label>Окантовка, см<input type="number" min="1" max="30" step="0.1" value={document.bindingWidthCm ?? 6.35} onChange={(event) => commit((current) => ({ ...current, bindingWidthCm: Math.max(1, Number(event.target.value)) }))} /></label>
+                <label>{text('Припуск', 'Seam allowance')}, {lengthUnit}<input type="number" min="0" max={toDisplayLength(3)} step={measurementSystem === 'metric' ? 0.1 : 0.125} value={toDisplayLength(document.seamAllowanceCm)} onChange={(event) => commit((current) => ({ ...current, seamAllowanceCm: Math.min(3, Math.max(0, fromDisplayLength(Number(event.target.value)))) }))} /></label>
+                <label>{text('Ширина ткани', 'Fabric width')}, {lengthUnit}<input type="number" min={toDisplayLength(40)} max={toDisplayLength(300)} step={measurementSystem === 'metric' ? 1 : 0.25} value={toDisplayLength(document.fabricWidthCm ?? 110)} onChange={(event) => commit((current) => ({ ...current, fabricWidthCm: Math.min(300, Math.max(40, fromDisplayLength(Number(event.target.value)))) }))} /></label>
+                <label>{text('Запас изнанки', 'Backing extra')}, {lengthUnit}<input type="number" min="0" max={toDisplayLength(100)} step={measurementSystem === 'metric' ? 1 : 0.25} value={toDisplayLength(document.backingExtraCm ?? 10)} onChange={(event) => commit((current) => ({ ...current, backingExtraCm: Math.min(100, Math.max(0, fromDisplayLength(Number(event.target.value)))) }))} /></label>
+                <label>{text('Окантовка', 'Binding width')}, {lengthUnit}<input type="number" min={toDisplayLength(1)} max={toDisplayLength(30)} step={measurementSystem === 'metric' ? 0.1 : 0.125} value={toDisplayLength(document.bindingWidthCm ?? 6.35)} onChange={(event) => commit((current) => ({ ...current, bindingWidthCm: Math.min(30, Math.max(1, fromDisplayLength(Number(event.target.value)))) }))} /></label>
               </div>
               <div className="track-actions">
-                <span>{selectedHeader ? `${selectedHeader.kind === 'row' ? 'Ряд' : 'Столбец'} ${selectedHeader.index + 1}` : 'Выберите номер у холста'}</span>
-                <button onClick={() => changeSelectedTrack('resize')}>Размер</button>
-                <button onClick={() => changeSelectedTrack('insert-before')}>＋ До</button>
-                <button onClick={() => changeSelectedTrack('insert-after')}>＋ После</button>
-                <button onClick={() => changeSelectedTrack('remove')}>Удалить</button>
+                <span>{selectedHeader
+                  ? `${selectedHeader.kind === 'row' ? text('Ряд', 'Row') : text('Столбец', 'Column')} ${selectedHeader.index + 1}`
+                  : text('Выберите номер у холста', 'Select a number beside the canvas')}</span>
+                <button onClick={() => changeSelectedTrack('resize')}>{text('Размер', 'Size')}</button>
+                <button onClick={() => changeSelectedTrack('insert-before')}>＋ {text('До', 'Before')}</button>
+                <button onClick={() => changeSelectedTrack('insert-after')}>＋ {text('После', 'After')}</button>
+                <button onClick={() => changeSelectedTrack('remove')}>{text('Удалить', 'Remove')}</button>
               </div>
               <label className="toggle-row">
                 <input type="checkbox" checked={document.showGrid ?? true} onChange={(event) => commit((current) => ({ ...current, showGrid: event.target.checked }))} />
-                Показывать линии сетки
+                {text('Показывать линии сетки', 'Show grid lines')}
               </label>
               <label className="toggle-row">
                 <input type="checkbox" checked={autosave} onChange={(event) => {
                   setAutosave(event.target.checked)
                   window.localStorage.setItem(AUTOSAVE_KEY, String(event.target.checked))
                 }} />
-                Автосохранение
+                {text('Автосохранение', 'Autosave')}
               </label>
-              <label className="notes-field">Заметки
-                <textarea value={document.notes ?? ''} onChange={(event) => commit((current) => ({ ...current, notes: event.target.value }))} placeholder="Материалы, сборка, идеи…" />
+              <label className="notes-field">{text('Заметки', 'Notes')}
+                <textarea value={document.notes ?? ''} onChange={(event) => commit((current) => ({ ...current, notes: event.target.value }))} placeholder={text('Материалы, сборка, идеи…', 'Materials, assembly, ideas…')} />
               </label>
               <div className="estimate-card">
-                <p>Готовый размер</p><strong>{estimate.finishedWidthCm.toLocaleString('ru-RU')} × {estimate.finishedHeightCm.toLocaleString('ru-RU')} см</strong>
-                <div><span>{estimate.blocks} блоков</span><span>≈ {estimate.fabricMeters.toLocaleString('ru-RU')} м ткани*</span></div>
+                <p>{text('Готовый размер', 'Finished size')}</p><strong>{formatLength(estimate.finishedWidthCm)} × {formatLength(estimate.finishedHeightCm)}</strong>
+                <div><span>{estimate.blocks} {text('блоков', 'blocks')}</span><span>≈ {formatFabricLength(estimate.fabricMeters)} {text('ткани', 'of fabric')}*</span></div>
               </div>
-              <p className="fine-print">* Быстрая оценка. Подробный раскрой — во вкладке «Расход».</p>
+              <p className="fine-print">{text('* Быстрая оценка. Подробный раскрой — во вкладке «Расход».', '* Quick estimate. See the Fabric tab for detailed cutting instructions.')}</p>
               <button className="danger-link" onClick={() => {
-                if (!window.confirm('Сбросить весь квилт? Это действие можно отменить только до перезагрузки.')) return
+                if (!window.confirm(text('Сбросить весь квилт? Это действие можно отменить только до перезагрузки.', 'Reset the entire quilt? This can only be undone before reloading.'))) return
                 const next = createDocument()
                 dispatch({ type: 'reset', next })
                 setSelectedCells(new Set([0]))
-              }}>Начать заново</button>
+              }}>{text('Начать заново', 'Start over')}</button>
             </>
           )}
 
@@ -903,42 +970,42 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
 
         <section className="stage">
           <div className="context-toolbar">
-            <button className={tool === 'eyedropper' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('eyedropper')} title="Пипетка: взять блок с холста">◉</button>
-            <button className={tool === 'select' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('select')} title="Выделение">↖ <span>Выбрать</span></button>
-            <button className={tool === 'pan' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('pan')} title="Перемещать холст">✋</button>
-            <button className="tool-button" onClick={() => selectPreset('odd')} title="Шахматное выделение">▦</button>
-            <button className="tool-button" onClick={() => selectPreset('even')} title="Обратное шахматное выделение">▧</button>
-            <button className="tool-button" onClick={() => selectPreset('border')} title="Выделить край">□</button>
-            <button className="tool-button" onClick={() => selectPreset('diagonal')} title="Выделить диагональ">╱</button>
-            <button className="tool-button" onClick={() => selectPreset('clear')} title="Снять выделение">×</button>
+            <button className={tool === 'eyedropper' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('eyedropper')} title={text('Пипетка: взять блок с холста', 'Eyedropper: sample a block from the canvas')}>◉</button>
+            <button className={tool === 'select' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('select')} title={text('Выделение', 'Selection')}>↖ <span>{text('Выбрать', 'Select')}</span></button>
+            <button className={tool === 'pan' ? 'tool-button active' : 'tool-button'} onClick={() => setTool('pan')} title={text('Перемещать холст', 'Pan canvas')}>✋</button>
+            <button className="tool-button" onClick={() => selectPreset('odd')} title={text('Шахматное выделение', 'Checkerboard selection')}>▦</button>
+            <button className="tool-button" onClick={() => selectPreset('even')} title={text('Обратное шахматное выделение', 'Inverse checkerboard selection')}>▧</button>
+            <button className="tool-button" onClick={() => selectPreset('border')} title={text('Выделить край', 'Select border')}>□</button>
+            <button className="tool-button" onClick={() => selectPreset('diagonal')} title={text('Выделить диагональ', 'Select diagonal')}>╱</button>
+            <button className="tool-button" onClick={() => selectPreset('clear')} title={text('Снять выделение', 'Clear selection')}>×</button>
             <span className="toolbar-divider" />
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={rotateSelectionLeft} title="Повернуть влево">↺</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={rotateSelection} title="Повернуть вправо">↻</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={randomizeSelectionRotation} title="Случайный поворот">⤨</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={resetSelectionRotation} title="Сбросить поворот">0°</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={() => mirrorSelection('x')} title="Отразить горизонтально">↔</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={() => mirrorSelection('y')} title="Отразить вертикально">↕</button>
-            <button className="tool-button" disabled={selectedIndices.length < 2} onClick={mergeSelection} title="Объединить ячейки">⊞</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={unmergeSelection} title="Разъединить ячейки">⊟</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={rotateSelectionLeft} title={text('Повернуть влево', 'Rotate left')}>↺</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={rotateSelection} title={text('Повернуть вправо', 'Rotate right')}>↻</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={randomizeSelectionRotation} title={text('Случайный поворот', 'Random rotation')}>⤨</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={resetSelectionRotation} title={text('Сбросить поворот', 'Reset rotation')}>0°</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={() => mirrorSelection('x')} title={text('Отразить горизонтально', 'Flip horizontally')}>↔</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={() => mirrorSelection('y')} title={text('Отразить вертикально', 'Flip vertically')}>↕</button>
+            <button className="tool-button" disabled={selectedIndices.length < 2} onClick={mergeSelection} title={text('Объединить ячейки', 'Merge cells')}>⊞</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={unmergeSelection} title={text('Разъединить ячейки', 'Unmerge cells')}>⊟</button>
             {document.gridType === 'free' && (
               <>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(-10, 0)} title="Сдвинуть влево">←</button>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(10, 0)} title="Сдвинуть вправо">→</button>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, -10)} title="Сдвинуть вверх">↑</button>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 10)} title="Сдвинуть вниз">↓</button>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 0, 0.9)} title="Уменьшить блок">−□</button>
-                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 0, 1.1)} title="Увеличить блок">＋□</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(-10, 0)} title={text('Сдвинуть влево', 'Move left')}>←</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(10, 0)} title={text('Сдвинуть вправо', 'Move right')}>→</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, -10)} title={text('Сдвинуть вверх', 'Move up')}>↑</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 10)} title={text('Сдвинуть вниз', 'Move down')}>↓</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 0, 0.9)} title={text('Уменьшить блок', 'Shrink block')}>−□</button>
+                <button className="tool-button" disabled={!selectedIndices.length} onClick={() => transformFreeSelection(0, 0, 1.1)} title={text('Увеличить блок', 'Enlarge block')}>＋□</button>
               </>
             )}
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={copySelection} title="Копировать">⧉</button>
-            <button className="tool-button" disabled={!selectedIndices.length || !copiedCell.current} onClick={pasteSelection} title="Вставить">▣</button>
-            <button className="tool-button" disabled={!selectedIndices.length} onClick={clearSelection} title="Очистить">⌫</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={copySelection} title={text('Копировать', 'Copy')}>⧉</button>
+            <button className="tool-button" disabled={!selectedIndices.length || !copiedCell.current} onClick={pasteSelection} title={text('Вставить', 'Paste')}>▣</button>
+            <button className="tool-button" disabled={!selectedIndices.length} onClick={clearSelection} title={text('Очистить', 'Clear')}>⌫</button>
             <span className="toolbar-divider" />
-            <button className="tool-button" onClick={() => selectPreset('all')}>Всё</button>
+            <button className="tool-button" onClick={() => selectPreset('all')}>{text('Всё', 'All')}</button>
             <div className="zoom-control">
-              <button onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))} aria-label="Уменьшить">−</button>
+              <button onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))} aria-label={text('Уменьшить', 'Zoom out')}>−</button>
               <span>{Math.round(zoom * 100)}%</span>
-              <button onClick={() => setZoom((value) => Math.min(1.5, value + 0.1))} aria-label="Увеличить">+</button>
+              <button onClick={() => setZoom((value) => Math.min(1.5, value + 0.1))} aria-label={text('Увеличить', 'Zoom in')}>+</button>
             </div>
           </div>
 
@@ -957,15 +1024,15 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
             <div className="canvas-wrap" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
               <div className="quilt-shadow">
                 <div className="artboard-grid">
-                  <button className="grid-corner" onClick={() => selectPreset('all')} title="Выбрать всё">∞</button>
+                  <button className="grid-corner" onClick={() => selectPreset('all')} title={text('Выбрать всё', 'Select all')}>∞</button>
                   <div className="column-headers" style={{ gridTemplateColumns: `repeat(${document.columns}, 1fr)` }}>
                     {Array.from({ length: document.columns }, (_, column) => (
-                      <button key={column} onClick={() => selectColumn(column)} aria-label={`Выбрать столбец ${column + 1}`}>{column + 1}</button>
+                      <button key={column} onClick={() => selectColumn(column)} aria-label={text(`Выбрать столбец ${column + 1}`, `Select column ${column + 1}`)}>{column + 1}</button>
                     ))}
                   </div>
                   <div className="row-headers" style={{ gridTemplateRows: `repeat(${document.rows}, 1fr)` }}>
                     {Array.from({ length: document.rows }, (_, row) => (
-                      <button key={row} onClick={() => selectRow(row)} aria-label={`Выбрать ряд ${row + 1}`}>{row + 1}</button>
+                      <button key={row} onClick={() => selectRow(row)} aria-label={text(`Выбрать ряд ${row + 1}`, `Select row ${row + 1}`)}>{row + 1}</button>
                     ))}
                   </div>
                   <div
@@ -975,7 +1042,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                       gridTemplateRows: (document.rowSizesCm ?? Array.from({ length: document.rows }, () => document.blockSizeCm)).map((size) => `${size}fr`).join(' '),
                       aspectRatio: `${estimate.finishedWidthCm} / ${estimate.finishedHeightCm}`,
                     }}
-                    aria-label={`Макет ${document.columns} на ${document.rows}`}
+                    aria-label={text(`Макет ${document.columns} на ${document.rows}`, `${document.columns} by ${document.rows} layout`)}
                   >
                     {document.cells.flatMap((cell, index) => {
                       if (cell.mergedInto !== undefined) return []
@@ -998,7 +1065,10 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                             if (painting.current && tool === 'paint') applyPattern(index)
                             if (selectionAnchor.current !== null && tool === 'select') dragSelectionTo(index)
                           }}
-                          aria-label={`Блок ${index + 1}: ${patternById(cell.patternId, document.customPatterns).name}`}
+                          aria-label={text(
+                            `Блок ${index + 1}: ${patternName(cell.patternId, patternById(cell.patternId, document.customPatterns).name)}`,
+                            `Block ${index + 1}: ${patternName(cell.patternId, patternById(cell.patternId, document.customPatterns).name)}`,
+                          )}
                         >
                           <PatternPreview cell={cell} palette={document.palette} patterns={document.customPatterns} fabricFills={document.fabricFills} fabricPlacements={document.fabricPlacements} />
                         </button>
@@ -1007,7 +1077,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
                   </div>
                 </div>
               </div>
-              <p className="canvas-caption">{document.name} · {estimate.finishedWidthCm} × {estimate.finishedHeightCm} см</p>
+              <p className="canvas-caption">{document.name} · {formatLength(estimate.finishedWidthCm)} × {formatLength(estimate.finishedHeightCm)}</p>
             </div>
           </div>
         </section>
@@ -1026,7 +1096,7 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
             setTool('paint')
             setBlockEditor(null)
             onSaveBlock?.(pattern.name, pattern.id)
-            flash('Блок сохранён')
+            flash(text('Блок сохранён', 'Block saved'))
           }}
         />
       )}

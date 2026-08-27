@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import type { BlockPattern, PatternShape } from './editorModel'
+import { usePreferences } from './i18n'
 import './block-editor.css'
 
 export interface BlockEditorModalProps {
@@ -98,10 +99,22 @@ function makePatternId(name: string, signature: string, sourceId?: string): Bloc
 
 
 export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEditorModalProps) {
+  const {
+    measurementSystem,
+    text,
+    patternName,
+    lengthUnit,
+    toDisplayLength,
+    fromDisplayLength,
+    formatLength,
+  } = usePreferences()
   const source = pattern as PatternWithDimensions | undefined
-  const [name, setName] = useState(pattern ? `${pattern.name} — копия` : 'Новый блок')
-  const [width, setWidth] = useState(String(source?.widthCm ?? 25))
-  const [height, setHeight] = useState(String(source?.heightCm ?? 25))
+  const sourceName = pattern && !pattern.source ? patternName(String(pattern.id), pattern.name) : pattern?.name
+  const [name, setName] = useState(pattern
+    ? text(`${sourceName} — копия`, `${sourceName} — copy`)
+    : text('Новый блок', 'New block'))
+  const [width, setWidth] = useState(String(toDisplayLength(source?.widthCm ?? 25)))
+  const [height, setHeight] = useState(String(toDisplayLength(source?.heightCm ?? 25)))
   const [divisions, setDivisions] = useState(DEFAULT_DIVISIONS)
   const [showGrid, setShowGrid] = useState(true)
   const [activeColor, setActiveColor] = useState(palette[1] ? 1 : 0)
@@ -110,22 +123,55 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
   const painting = useRef(false)
   const nameInput = useRef<HTMLInputElement>(null)
   const dialog = useRef<HTMLFormElement>(null)
+  const previousMeasurementSystem = useRef(measurementSystem)
+  const previousFromDisplayLength = useRef(fromDisplayLength)
 
-  const widthCm = Number(width.replace(',', '.'))
-  const heightCm = Number(height.replace(',', '.'))
+  const parsedWidth = Number(width.replace(',', '.'))
+  const parsedHeight = Number(height.replace(',', '.'))
+  const widthCm = fromDisplayLength(parsedWidth)
+  const heightCm = fromDisplayLength(parsedHeight)
+  const minimumSizeCm = 0.1
+  const maximumSizeCm = 1000
   const validationError = useMemo(() => {
-    if (!name.trim()) return 'Введите название блока.'
-    if (!Number.isFinite(widthCm) || widthCm <= 0 || widthCm > 1000) return 'Ширина должна быть от 0,1 до 1000 см.'
-    if (!Number.isFinite(heightCm) || heightCm <= 0 || heightCm > 1000) return 'Высота должна быть от 0,1 до 1000 см.'
-    if (palette.length === 0) return 'Добавьте хотя бы один цвет в палитру квилта.'
+    if (!name.trim()) return text('Введите название блока.', 'Enter a block name.')
+    if (!Number.isFinite(widthCm) || widthCm < minimumSizeCm || widthCm > maximumSizeCm) {
+      return text(
+        `Ширина должна быть от ${formatLength(minimumSizeCm)} до ${formatLength(maximumSizeCm)}.`,
+        `Width must be between ${formatLength(minimumSizeCm)} and ${formatLength(maximumSizeCm)}.`,
+      )
+    }
+    if (!Number.isFinite(heightCm) || heightCm < minimumSizeCm || heightCm > maximumSizeCm) {
+      return text(
+        `Высота должна быть от ${formatLength(minimumSizeCm)} до ${formatLength(maximumSizeCm)}.`,
+        `Height must be between ${formatLength(minimumSizeCm)} and ${formatLength(maximumSizeCm)}.`,
+      )
+    }
+    if (palette.length === 0) {
+      return text('Добавьте хотя бы один цвет в палитру квилта.', 'Add at least one color to the quilt palette.')
+    }
     return ''
-  }, [heightCm, name, palette.length, widthCm])
+  }, [formatLength, heightCm, name, palette.length, text, widthCm])
   const previewShapes = useMemo(() => shapesFromCells(cells, divisions), [cells, divisions])
 
   useEffect(() => {
     nameInput.current?.focus()
     nameInput.current?.select()
   }, [])
+
+  useEffect(() => {
+    if (previousMeasurementSystem.current === measurementSystem) return
+    const convertFromPreviousUnit = previousFromDisplayLength.current
+    setWidth((current) => {
+      const value = Number(current.replace(',', '.'))
+      return Number.isFinite(value) ? String(toDisplayLength(convertFromPreviousUnit(value))) : current
+    })
+    setHeight((current) => {
+      const value = Number(current.replace(',', '.'))
+      return Number.isFinite(value) ? String(toDisplayLength(convertFromPreviousUnit(value))) : current
+    })
+    previousMeasurementSystem.current = measurementSystem
+    previousFromDisplayLength.current = fromDisplayLength
+  }, [fromDisplayLength, measurementSystem, toDisplayLength])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -228,11 +274,23 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
       >
         <header className="block-editor-header">
           <div>
-            <p className="block-editor-eyebrow">Мастерская блока</p>
-            <h2 id="block-editor-title">{pattern ? 'Создать на основе блока' : 'Создать свой блок'}</h2>
-            <p id="block-editor-intro">Соберите раппорт по клеткам и сохраните его в библиотеку квилта.</p>
+            <p className="block-editor-eyebrow">{text('Мастерская блока', 'Block workshop')}</p>
+            <h2 id="block-editor-title">
+              {pattern ? text('Создать на основе блока', 'Create from block') : text('Создать свой блок', 'Create custom block')}
+            </h2>
+            <p id="block-editor-intro">
+              {text(
+                'Соберите раппорт по клеткам и сохраните его в библиотеку квилта.',
+                'Build a repeat on the grid and save it to the quilt library.',
+              )}
+            </p>
           </div>
-          <button className="block-editor-close" type="button" onClick={onClose} aria-label="Закрыть редактор">
+          <button
+            className="block-editor-close"
+            type="button"
+            onClick={onClose}
+            aria-label={text('Закрыть редактор', 'Close editor')}
+          >
             <span aria-hidden="true">×</span>
           </button>
         </header>
@@ -241,17 +299,21 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
           <div className="block-editor-workspace">
             <div className="block-editor-canvas-heading">
               <div>
-                <strong>Схема блока</strong>
-                <span>{divisions} × {divisions} клеток</span>
+                <strong>{text('Схема блока', 'Block layout')}</strong>
+                <span>
+                  {divisions} × {divisions} {text('клеток', 'cells')}
+                </span>
               </div>
-              <div className="block-editor-compact-actions" aria-label="Заливка схемы">
+              <div className="block-editor-compact-actions" aria-label={text('Заливка схемы', 'Layout fill controls')}>
                 <button
                   type="button"
                   onClick={() => setCells(Array(divisions * divisions).fill(palette[activeColor] ? activeColor : 0))}
                 >
-                  Залить
+                  {text('Залить', 'Fill')}
                 </button>
-                <button type="button" onClick={() => setCells(Array(divisions * divisions).fill(0))}>Очистить</button>
+                <button type="button" onClick={() => setCells(Array(divisions * divisions).fill(0))}>
+                  {text('Очистить', 'Clear')}
+                </button>
               </div>
             </div>
 
@@ -265,13 +327,16 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                   onPointerDown={(event) => startPainting(event, index)}
                   onPointerEnter={() => { if (painting.current) paintCell(index) }}
                   onClick={() => paintCell(index)}
-                  aria-label={`Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}: цвет ${COLOR_TAGS[color] ?? 'A'}`}
+                  aria-label={text(
+                    `Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}: цвет ${COLOR_TAGS[color] ?? 'A'}`,
+                    `Cell ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}: color ${COLOR_TAGS[color] ?? 'A'}`,
+                  )}
                 />
               ))}
             </div>
 
             <fieldset className="block-editor-palette">
-              <legend>Цвет ткани</legend>
+              <legend>{text('Цвет ткани', 'Fabric color')}</legend>
               <div className="block-editor-swatches">
                 {COLOR_TAGS.map((tag, index) => {
                   const color = palette[index]
@@ -283,7 +348,9 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                       onClick={() => setActiveColor(index)}
                       disabled={!color}
                       aria-pressed={activeColor === index}
-                      aria-label={color ? `Выбрать цвет ${tag}` : `Цвет ${tag} недоступен`}
+                      aria-label={color
+                        ? text(`Выбрать цвет ${tag}`, `Select color ${tag}`)
+                        : text(`Цвет ${tag} недоступен`, `Color ${tag} unavailable`)}
                     >
                       <span className="block-editor-swatch-color" style={{ backgroundColor: color }} aria-hidden="true" />
                       <b>{tag}</b>
@@ -294,9 +361,9 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
             </fieldset>
           </div>
 
-          <aside className="block-editor-settings" aria-label="Параметры блока">
+          <aside className="block-editor-settings" aria-label={text('Параметры блока', 'Block settings')}>
             <label className="block-editor-field block-editor-field--wide">
-              <span>Название</span>
+              <span>{text('Название', 'Name')}</span>
               <input
                 ref={nameInput}
                 value={name}
@@ -309,35 +376,35 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
 
             <div className="block-editor-dimensions">
               <label className="block-editor-field">
-                <span>Ширина, см</span>
+                <span>{text('Ширина', 'Width')}, {lengthUnit}</span>
                 <input
                   type="number"
-                  min="0.1"
-                  max="1000"
-                  step="0.1"
+                  min={String(toDisplayLength(minimumSizeCm))}
+                  max={String(toDisplayLength(maximumSizeCm))}
+                  step={measurementSystem === 'metric' ? '0.1' : '0.01'}
                   value={width}
                   onChange={(event) => setWidth(event.target.value)}
-                  aria-invalid={saveAttempted && (!Number.isFinite(widthCm) || widthCm <= 0 || widthCm > 1000)}
+                  aria-invalid={saveAttempted && (!Number.isFinite(widthCm) || widthCm < minimumSizeCm || widthCm > maximumSizeCm)}
                   aria-describedby="block-editor-status"
                 />
               </label>
               <label className="block-editor-field">
-                <span>Высота, см</span>
+                <span>{text('Высота', 'Height')}, {lengthUnit}</span>
                 <input
                   type="number"
-                  min="0.1"
-                  max="1000"
-                  step="0.1"
+                  min={String(toDisplayLength(minimumSizeCm))}
+                  max={String(toDisplayLength(maximumSizeCm))}
+                  step={measurementSystem === 'metric' ? '0.1' : '0.01'}
                   value={height}
                   onChange={(event) => setHeight(event.target.value)}
-                  aria-invalid={saveAttempted && (!Number.isFinite(heightCm) || heightCm <= 0 || heightCm > 1000)}
+                  aria-invalid={saveAttempted && (!Number.isFinite(heightCm) || heightCm < minimumSizeCm || heightCm > maximumSizeCm)}
                   aria-describedby="block-editor-status"
                 />
               </label>
             </div>
 
             <label className="block-editor-field block-editor-field--wide">
-              <span>Деления сетки</span>
+              <span>{text('Деления сетки', 'Grid divisions')}</span>
               <select value={divisions} onChange={(event) => changeDivisions(Number(event.target.value))}>
                 {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
                   <option key={value} value={value}>{value} × {value}</option>
@@ -348,17 +415,25 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
             <label className="block-editor-toggle">
               <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
               <span aria-hidden="true" />
-              Показывать линии построения
+              {text('Показывать линии построения', 'Show construction lines')}
             </label>
 
             <div className="block-editor-preview-section">
               <div className="block-editor-section-title">
-                <strong>Предпросмотр</strong>
-                <span>{width || '—'} × {height || '—'} см</span>
+                <strong>{text('Предпросмотр', 'Preview')}</strong>
+                <span>
+                  {Number.isFinite(widthCm) && widthCm > 0 ? formatLength(widthCm) : '—'}
+                  {' × '}
+                  {Number.isFinite(heightCm) && heightCm > 0 ? formatLength(heightCm) : '—'}
+                </span>
               </div>
               <div className="block-editor-preview-frame">
                 <div className="block-editor-preview" style={previewStyle}>
-                  <svg viewBox="0 0 100 100" role="img" aria-label="Предпросмотр нового блока">
+                  <svg
+                    viewBox="0 0 100 100"
+                    role="img"
+                    aria-label={text('Предпросмотр нового блока', 'New block preview')}
+                  >
                     <rect width="100" height="100" fill={palette[0]} />
                     {previewShapes.map((shape, index) => (
                       <polygon
@@ -380,11 +455,18 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
 
         <footer className="block-editor-footer">
           <p id="block-editor-status" className={`block-editor-status${saveAttempted && validationError ? ' block-editor-status--error' : ''}`} role="status">
-            {saveAttempted && validationError ? validationError : 'Блок сохранится как новый — исходный узор не изменится.'}
+            {saveAttempted && validationError
+              ? validationError
+              : text(
+                'Блок сохранится как новый — исходный узор не изменится.',
+                'The block will be saved as new—the source pattern will not change.',
+              )}
           </p>
           <div className="block-editor-footer-actions">
-            <button className="block-editor-secondary" type="button" onClick={onClose}>Отмена</button>
-            <button className="block-editor-primary" type="submit">Сохранить блок</button>
+            <button className="block-editor-secondary" type="button" onClick={onClose}>
+              {text('Отмена', 'Cancel')}
+            </button>
+            <button className="block-editor-primary" type="submit">{text('Сохранить блок', 'Save block')}</button>
           </div>
         </footer>
       </form>

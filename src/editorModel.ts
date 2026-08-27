@@ -1,3 +1,4 @@
+import type { Language } from './i18n'
 import { STANDARD_PATTERNS } from './standardPatterns'
 
 export type PatternId = string
@@ -928,7 +929,6 @@ export interface CutPieceInstruction {
   cutHeightCm: number
   pieces: number
   rectanglesToCut: number
-  instruction: string
 }
 export type FabricDiagnosticCode =
   | 'custom-pattern'
@@ -978,7 +978,7 @@ function packAcrossWidth(pieces: readonly PackingPiece[], fabricWidthCm: number)
 }
 
 /** Piece-level cutting plan for standard geometry; ambiguous geometry uses diagnosed template blanks. */
-export function calculateDetailedFabric(document: QuiltDocument): DetailedFabricEstimate {
+export function calculateDetailedFabric(document: QuiltDocument, language: Language = 'ru'): DetailedFabricEstimate {
   const fabricWidthCm = finitePositive(document.fabricWidthCm, 110)
   const backingExtraCm = finiteNonNegative(document.backingExtraCm, 10)
   const bindingWidthCm = finitePositive(document.bindingWidthCm, 6.35)
@@ -990,7 +990,9 @@ export function calculateDetailedFabric(document: QuiltDocument): DetailedFabric
     diagnostics.push({
       code: 'unsupported-geometry',
       severity: 'warning',
-      message: `Сетка «${document.gridType}» рассчитана по ограничивающему прямоугольнику; проверьте размеры вручную.`,
+      message: language === 'ru'
+        ? `Сетка «${document.gridType}» рассчитана по ограничивающему прямоугольнику; проверьте размеры вручную.`
+        : `The ${document.gridType} grid was calculated using its bounding rectangle; verify the dimensions manually.`,
     })
   }
 
@@ -1054,7 +1056,6 @@ export function calculateDetailedFabric(document: QuiltDocument): DetailedFabric
       cutHeightCm: rounded(cutHeightCm),
       pieces: 1,
       rectanglesToCut: 1,
-      instruction: '',
     })
   }
   const mergedChildren = new Map<number, number[]>()
@@ -1072,7 +1073,14 @@ export function calculateDetailedFabric(document: QuiltDocument): DetailedFabric
     const pattern = custom ?? builtIn ?? PATTERNS[0]
     if (!custom && !builtIn && !reported.has(`unknown:${cell.patternId}`)) {
       reported.add(`unknown:${cell.patternId}`)
-      diagnostics.push({ code: 'unknown-pattern', severity: 'warning', patternId: cell.patternId, message: `Узор «${cell.patternId}» не найден; использован однотонный блок.` })
+      diagnostics.push({
+        code: 'unknown-pattern',
+        severity: 'warning',
+        patternId: cell.patternId,
+        message: language === 'ru'
+          ? `Узор «${cell.patternId}» не найден; использован однотонный блок.`
+          : `Pattern “${cell.patternId}” was not found; a solid block was used.`,
+      })
     }
     if (custom && !reported.has(`custom:${pattern.id}`)) {
       reported.add(`custom:${pattern.id}`)
@@ -1080,20 +1088,38 @@ export function calculateDetailedFabric(document: QuiltDocument): DetailedFabric
         code: pattern.source === 'imported' ? 'imported-pattern' : 'custom-pattern',
         severity: 'warning',
         patternId: pattern.id,
-        message: pattern.source === 'imported'
-          ? `Импортированный узор «${pattern.name}»: физическая сборка неоднозначна; использован консервативный план полноразмерных шаблонных заготовок.`
-          : `Пользовательский узор «${pattern.name}»: физическая сборка неоднозначна; использован консервативный план полноразмерных шаблонных заготовок.`,
+        message: language === 'ru'
+          ? pattern.source === 'imported'
+            ? `Импортированный узор «${pattern.name}»: физическая сборка неоднозначна; использован консервативный план полноразмерных шаблонных заготовок.`
+            : `Пользовательский узор «${pattern.name}»: физическая сборка неоднозначна; использован консервативный план полноразмерных шаблонных заготовок.`
+          : pattern.source === 'imported'
+            ? `Imported pattern “${pattern.name}”: physical assembly is ambiguous; a conservative plan of full-size template blanks was used.`
+            : `Custom pattern “${pattern.name}”: physical assembly is ambiguous; a conservative plan of full-size template blanks was used.`,
       })
     }
     const fractions = fractionsCache.get(pattern.id) ?? exactPatternFractions(pattern)
     fractionsCache.set(pattern.id, fractions)
     if (fractions.unsupported && !reported.has(`unsupported:${pattern.id}`)) {
       reported.add(`unsupported:${pattern.id}`)
-      diagnostics.push({ code: 'unsupported-geometry', severity: 'warning', patternId: pattern.id, message: `${pattern.name}: ${fractions.unsupported}` })
+      diagnostics.push({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: pattern.id,
+        message: language === 'ru'
+          ? `${pattern.name}: ${fractions.unsupported}`
+          : `${pattern.name}: this geometry cannot be calculated exactly; a conservative full-block estimate was used.`,
+      })
     }
     if (fractions.overlap && !reported.has(`overlap:${pattern.id}`)) {
       reported.add(`overlap:${pattern.id}`)
-      diagnostics.push({ code: 'overlapping-shapes', severity: 'warning', patternId: pattern.id, message: `${pattern.name}: перекрывающиеся слои не задают однозначных физических деталей; использован консервативный план полноразмерных шаблонных заготовок.` })
+      diagnostics.push({
+        code: 'overlapping-shapes',
+        severity: 'warning',
+        patternId: pattern.id,
+        message: language === 'ru'
+          ? `${pattern.name}: перекрывающиеся слои не задают однозначных физических деталей; использован консервативный план полноразмерных шаблонных заготовок.`
+          : `${pattern.name}: overlapping layers do not define unambiguous physical pieces; a conservative plan of full-size template blanks was used.`,
+      })
     }
 
     const ownerRow = Math.floor(index / document.columns)
@@ -1131,18 +1157,10 @@ export function calculateDetailedFabric(document: QuiltDocument): DetailedFabric
   })
 
   const pieceInstructions = [...pieceInstructionDrafts.values()]
-    .map((piece): CutPieceInstruction => {
-      const rectanglesToCut = piece.shape === 'triangle' ? Math.ceil(piece.pieces / 2) : piece.pieces
-      const dimensions = `${String(piece.cutWidthCm).replace('.', ',')} × ${String(piece.cutHeightCm).replace('.', ',')} см`
-      const instruction = piece.shape === 'triangle'
-        ? piece.pieces % 2 === 0
-          ? `Выкроить ${rectanglesToCut} прямоуг. ${dimensions}; разрезать каждый по диагонали — получится ${piece.pieces} треуг.`
-          : `Выкроить ${rectanglesToCut} прямоуг. ${dimensions}; разрезать каждый по диагонали, использовать ${piece.pieces} из ${rectanglesToCut * 2} треуг.`
-        : piece.shape === 'template'
-          ? `Подготовить ${rectanglesToCut} прямоуг. заготовок ${dimensions}; выкроить ${piece.pieces} дет. по шаблону «${piece.patternName}» с припуском ${String(DETAILED_SEAM_ALLOWANCE_CM).replace('.', ',')} см.`
-          : `Выкроить ${piece.pieces} ${piece.shape === 'square' ? 'квадр.' : 'прямоуг.'} ${dimensions}.`
-      return { ...piece, rectanglesToCut, instruction }
-    })
+    .map((piece): CutPieceInstruction => ({
+      ...piece,
+      rectanglesToCut: piece.shape === 'triangle' ? Math.ceil(piece.pieces / 2) : piece.pieces,
+    }))
     .sort((left, right) => left.paletteIndex - right.paletteIndex || left.patternName.localeCompare(right.patternName, 'ru'))
   pieceInstructions.forEach((piece) => {
     const paletteIndex = piece.paletteIndex

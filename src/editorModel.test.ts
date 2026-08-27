@@ -248,7 +248,7 @@ describe('detailed fabric calculation', () => {
       pieces: 1,
       rectanglesToCut: 1,
     })])
-    expect(estimate.pieceInstructions[0].instruction).toContain('31,27 × 21,27 см')
+    expect(estimate.pieceInstructions[0]).not.toHaveProperty('instruction')
     expect(estimate.diagnostics).toEqual([])
   })
 
@@ -299,12 +299,11 @@ describe('detailed fabric calculation', () => {
     const triangles = estimate.pieceInstructions.filter(({ shape }) => shape === 'triangle')
 
     expect(triangles).toHaveLength(2)
-    expect(triangles.every(({ pieces, rectanglesToCut, cutWidthCm, cutHeightCm, instruction }) =>
+    expect(triangles.every(({ pieces, rectanglesToCut, cutWidthCm, cutHeightCm }) =>
       pieces === 2
       && rectanglesToCut === 1
       && cutWidthCm === 26.27
-      && cutHeightCm === 26.27
-      && instruction.includes('разрезать каждый по диагонали'))).toBe(true)
+      && cutHeightCm === 26.27)).toBe(true)
     estimate.cutting.forEach((color) => {
       expect(color.cuttingAreaCm2).toBeCloseTo(26.27 * 26.27, 3)
       expect(color.packedLengthCm).toBe(26.27)
@@ -362,7 +361,34 @@ describe('detailed fabric calculation', () => {
     expect(estimate.blockBreakdown[0].patternId).toBe('imported-overlap')
     expect(estimate.diagnostics.every(({ message, severity }) => message.length > 0 && severity === 'warning')).toBe(true)
     expect(estimate.pieceInstructions.filter(({ patternId }) =>
-      patternId === 'imported-overlap' || patternId === 'unsupported').every(({ shape, instruction, patternName }) =>
-      shape === 'template' && instruction.includes('заготовок') && instruction.includes(patternName))).toBe(true)
+      patternId === 'imported-overlap' || patternId === 'unsupported').every(({ shape, rectanglesToCut, pieces }) =>
+      shape === 'template' && rectanglesToCut === pieces)).toBe(true)
+  })
+
+  it('localizes diagnostics without changing any calculated geometry or quantities', () => {
+    const document = {
+      ...createDocument(1, 1),
+      gridType: 'triangle' as const,
+      cells: [{ patternId: 'missing-pattern', rotation: 0 as const }],
+    }
+
+    const russian = calculateDetailedFabric(document)
+    const english = calculateDetailedFabric(document, 'en')
+
+    expect(russian.diagnostics.map(({ message }) => message)).toEqual([
+      expect.stringContaining('рассчитана'),
+      expect.stringContaining('не найден'),
+    ])
+    expect(english.diagnostics.map(({ message }) => message)).toEqual([
+      expect.stringContaining('was calculated'),
+      expect.stringContaining('was not found'),
+    ])
+    expect({
+      ...english,
+      diagnostics: undefined,
+    }).toEqual({
+      ...russian,
+      diagnostics: undefined,
+    })
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState, type CSSProperties, type MouseEvent } from 'react'
 import type { BlockPattern } from './editorModel'
+import { usePreferences } from './i18n'
 import './calculator.css'
 
 export interface PrintBlockModalProps {
@@ -16,10 +17,20 @@ const CALIBRATION_SIZE_CM = 5
 
 
 export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: PrintBlockModalProps) {
+  const {
+    measurementSystem,
+    text,
+    patternName,
+    lengthUnit,
+    toDisplayLength,
+    fromDisplayLength,
+    formatLength,
+  } = usePreferences()
   const [quantity, setQuantity] = useState(1)
   const [seamCm, setSeamCm] = useState(0.635)
   const [mirrored, setMirrored] = useState(false)
   const titleId = useId()
+  const displayPatternName = pattern.source ? pattern.name : patternName(String(pattern.id), pattern.name)
   const finishedSizeCm = Number.isFinite(blockSizeCm) && blockSizeCm >= 0 ? blockSizeCm : 0
   const cutSizeCm = finishedSizeCm + seamCm * 2
   const columnsPerPage = Math.max(0, Math.floor((PRINTABLE_WIDTH_CM + TEMPLATE_GAP_CM) / (cutSizeCm + TEMPLATE_GAP_CM)))
@@ -30,6 +41,9 @@ export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: Prin
     '--print-seam': `${seamCm}cm`,
   } as CSSProperties
   const templates = useMemo(() => Array.from({ length: quantity }, (_, index) => index), [quantity])
+  const finishedDimensions = `${formatLength(finishedSizeCm, 3)} × ${formatLength(finishedSizeCm, 3)}`
+  const cutDimensions = `${formatLength(cutSizeCm, 3)} × ${formatLength(cutSizeCm, 3)}`
+  const calibrationDimensions = `${formatLength(CALIBRATION_SIZE_CM, 3)} × ${formatLength(CALIBRATION_SIZE_CM, 3)}`
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -49,15 +63,23 @@ export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: Prin
         <section className="print-modal__dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
           <header className="print-modal__header print-modal__chrome">
             <div>
-              <p className="calculator-eyebrow">Печать в масштабе 100%</p>
-              <h2 id={titleId}>{pattern.name}</h2>
+              <p className="calculator-eyebrow">{text('Печать в масштабе 100%', 'Print at 100% scale')}</p>
+              <h2 id={titleId}>{displayPatternName}</h2>
             </div>
-            <button className="print-modal__close" type="button" onClick={onClose} aria-label="Закрыть" autoFocus>×</button>
+            <button
+              className="print-modal__close"
+              type="button"
+              onClick={onClose}
+              aria-label={text('Закрыть', 'Close')}
+              autoFocus
+            >
+              ×
+            </button>
           </header>
 
           <div className="print-modal__controls print-modal__chrome">
             <label>
-              Количество
+              {text('Количество', 'Quantity')}
               <input
                 type="number"
                 min="1"
@@ -70,42 +92,55 @@ export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: Prin
               />
             </label>
             <label>
-              Припуск, см
+              {text('Припуск', 'Seam allowance')}, {lengthUnit}
               <input
                 type="number"
                 min="0"
-                step="0.001"
-                value={seamCm}
+                step={measurementSystem === 'metric' ? '0.01' : '0.001'}
+                value={toDisplayLength(seamCm)}
                 onChange={(event) => {
                   const next = Number(event.target.value)
-                  setSeamCm(Number.isFinite(next) ? Math.max(0, next) : 0)
+                  setSeamCm(Number.isFinite(next) ? Math.max(0, fromDisplayLength(next)) : 0)
                 }}
               />
             </label>
             <label className="print-modal__check">
               <input type="checkbox" checked={mirrored} onChange={(event) => setMirrored(event.target.checked)} />
-              Отразить шаблон
+              {text('Отразить шаблон', 'Mirror template')}
             </label>
-            <button className="calculator-primary" type="button" onClick={() => window.print()}>Печать</button>
+            <button className="calculator-primary" type="button" onClick={() => window.print()}>
+              {text('Печать', 'Print')}
+            </button>
           </div>
 
           <div className="print-modal__facts print-modal__chrome" aria-live="polite">
-            <span><b>Готовый блок</b>{finishedSizeCm.toLocaleString('ru-RU')} × {finishedSizeCm.toLocaleString('ru-RU')} см</span>
-            <span><b>Размер с припусками</b>{cutSizeCm.toLocaleString('ru-RU', { maximumFractionDigits: 3 })} × {cutSizeCm.toLocaleString('ru-RU', { maximumFractionDigits: 3 })} см</span>
-            <span><b>Количество</b>{quantity}</span>
+            <span><b>{text('Готовый блок', 'Finished block')}</b>{finishedDimensions}</span>
+            <span><b>{text('Размер с припусками', 'Size with seam allowances')}</b>{cutDimensions}</span>
+            <span><b>{text('Количество', 'Quantity')}</b>{quantity}</span>
             <span>
-              <b>Вместимость A4</b>
-              {pageCapacity > 0 ? `до ${pageCapacity} шаблонов на листе` : 'шаблон крупнее печатной области'}
+              <b>{text('Вместимость A4', 'A4 capacity')}</b>
+              {pageCapacity > 0
+                ? text(`до ${pageCapacity} шаблонов на листе`, `up to ${pageCapacity} templates per sheet`)
+                : text('шаблон крупнее печатной области', 'template exceeds the printable area')}
             </span>
           </div>
 
           <p className="print-modal__notice print-modal__chrome">
-            Печатайте без масштабирования. Вместимость — ориентир для A4 с полями 1 см; диалог принтера может изменить доступную область.
+            {text(
+              `Печатайте без масштабирования. Вместимость — ориентир для A4 с полями ${formatLength(1)}; диалог принтера может изменить доступную область.`,
+              `Print without scaling. Capacity is an estimate for A4 with ${formatLength(1)} margins; the print dialog may change the available area.`,
+            )}
           </p>
 
           <div className="print-modal__paper" style={templateStyle}>
-            <aside className="print-calibration" aria-label={`Калибровочный квадрат ${CALIBRATION_SIZE_CM} сантиметров`}>
-              <span>{CALIBRATION_SIZE_CM} × {CALIBRATION_SIZE_CM} см</span>
+            <aside
+              className="print-calibration"
+              aria-label={text(
+                `Калибровочный квадрат ${formatLength(CALIBRATION_SIZE_CM, 3)}`,
+                `${formatLength(CALIBRATION_SIZE_CM, 3)} calibration square`,
+              )}
+            >
+              <span>{calibrationDimensions}</span>
             </aside>
             <div className="print-block-sheet">
               {templates.map((index) => (
@@ -115,7 +150,10 @@ export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: Prin
                       className={mirrored ? 'print-template__pattern is-mirrored' : 'print-template__pattern'}
                       viewBox="0 0 1 1"
                       role="img"
-                      aria-label={`${pattern.name}, шаблон ${index + 1}`}
+                      aria-label={text(
+                        `${displayPatternName}, шаблон ${index + 1}`,
+                        `${displayPatternName}, template ${index + 1}`,
+                      )}
                     >
                       <rect width="1" height="1" fill={palette[pattern.background] ?? palette[0] ?? 'var(--calculator-print-paper)'} />
                       {pattern.shapes.map((shape, shapeIndex) => (
@@ -129,7 +167,13 @@ export function PrintBlockModal({ pattern, palette, blockSizeCm, onClose }: Prin
                     <span className="print-template__seam" aria-hidden="true" />
                     <span className="print-template__label">{index + 1} / {quantity}</span>
                   </div>
-                  <figcaption>{pattern.name} · готовый {finishedSizeCm.toLocaleString('ru-RU')} см · крой {cutSizeCm.toLocaleString('ru-RU', { maximumFractionDigits: 3 })} см</figcaption>
+                  <figcaption>
+                    {displayPatternName}
+                    {' · '}
+                    {text('готовый', 'finished')} {formatLength(finishedSizeCm, 3)}
+                    {' · '}
+                    {text('крой', 'cut')} {formatLength(cutSizeCm, 3)}
+                  </figcaption>
                 </figure>
               ))}
             </div>
