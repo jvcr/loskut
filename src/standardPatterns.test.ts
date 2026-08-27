@@ -66,7 +66,7 @@ describe('standard quilt blocks', () => {
   it('keeps the canonical visible-piece counts for corrected traditional blocks', () => {
     const expectedCounts = {
       'four-patch': 2,
-      'flying-geese': 2,
+      'flying-geese': 1,
       'bear-paw': 21,
       basket: 9,
       'shoo-fly': 5,
@@ -88,6 +88,21 @@ describe('standard quilt blocks', () => {
     )
 
     expect(actualCounts).toEqual(expectedCounts)
+  })
+
+  it('models Flying Geese as one non-overlapping goose triangle over implicit background', () => {
+    const pattern = STANDARD_PATTERNS.find(({ id }) => id === 'flying-geese')
+
+    expect(pattern).toMatchObject({
+      id: 'flying-geese',
+      name: 'Летящие гуси',
+      background: 0,
+      shapes: [{
+        color: 1,
+        points: [[0, 1], [0.5, 0], [1, 1]],
+      }],
+    })
+    expect(pattern!.shapes).toHaveLength(1)
   })
 
   it('uses valid normalized rectangle and triangle geometry', () => {

@@ -1,5 +1,12 @@
 import type { Language } from './i18n'
 import { STANDARD_PATTERNS } from './standardPatterns'
+import {
+  resolveCuttingRecipe,
+  type FlyingGeeseMethod,
+  type RecipeMethod,
+  type RecipeRole,
+  type ResolvedRecipeBlank,
+} from './cuttingRecipes'
 
 export type PatternId = string
 
@@ -923,26 +930,40 @@ export interface CutPieceInstruction {
   patternId: PatternId
   patternName: string
   shape: 'square' | 'rectangle' | 'triangle' | 'template'
+  method: RecipeMethod
+  role: RecipeRole
   finishedWidthCm: number
   finishedHeightCm: number
   cutWidthCm: number
   cutHeightCm: number
   pieces: number
+  requiredPieces: number
+  batchBlankCount?: number
+  batchResultCount?: number
   rectanglesToCut: number
+  partnerPaletteIndex?: number
+  sourceUrl?: string
 }
 export type FabricDiagnosticCode =
   | 'custom-pattern'
   | 'imported-pattern'
+  | 'oversize-blank'
   | 'overlapping-shapes'
   | 'unsupported-geometry'
   | 'unknown-pattern'
-
 export interface FabricDiagnostic {
   code: FabricDiagnosticCode
   severity: 'info' | 'warning'
   message: string
   patternId?: PatternId
 }
+export interface ConstructionMethodSummary {
+  patternId: PatternId
+  patternName: string
+  method: RecipeMethod
+  sourceUrl: string
+}
+
 
 export interface DetailedFabricEstimate {
   seamAllowanceCm: number
@@ -954,31 +975,61 @@ export interface DetailedFabricEstimate {
   blockBreakdown: readonly BlockBreakdown[]
   cutting: readonly CuttingSummary[]
   pieceInstructions: readonly CutPieceInstruction[]
+  constructionMethods: readonly ConstructionMethodSummary[]
   diagnostics: readonly FabricDiagnostic[]
 }
+export interface DetailedFabricOptions {
+  flyingGeeseMethod?: FlyingGeeseMethod
+}
+
 
 const rounded = (value: number, digits = 3): number => Number(value.toFixed(digits))
 const metersRoundedUp = (lengthCm: number): number => Math.ceil(lengthCm / 10) / 10
 
 interface PackingPiece { width: number; height: number }
+interface PackingResult { lengthCm: number; oversized: readonly PackingPiece[] }
 
-function packAcrossWidth(pieces: readonly PackingPiece[], fabricWidthCm: number): number {
-  const shelves: { usedWidth: number; height: number }[] = []
-  const ordered = [...pieces].sort((a, b) => b.height - a.height || b.width - a.width)
-  for (const piece of ordered) {
-    const width = Math.min(piece.width, fabricWidthCm)
-    const repetitions = Math.max(1, Math.ceil(piece.width / fabricWidthCm))
-    for (let repetition = 0; repetition < repetitions; repetition += 1) {
-      const shelf = shelves.find((candidate) => candidate.usedWidth + width <= fabricWidthCm + 1e-9)
-      if (shelf) shelf.usedWidth += width
-      else shelves.push({ usedWidth: width, height: piece.height })
+function packAcrossWidth(pieces: readonly PackingPiece[], fabricWidthCm: number): PackingResult {
+  const oversized: PackingPiece[] = []
+  const fitting = pieces.flatMap((piece): PackingPiece[] => {
+    if (piece.width <= fabricWidthCm + 1e-9) return [piece]
+    if (piece.height <= fabricWidthCm + 1e-9) {
+      return [{ width: piece.height, height: piece.width }]
     }
+    oversized.push(piece)
+    return []
+  })
+  const shelves: { usedWidth: number; height: number }[] = []
+  const ordered = fitting.sort((a, b) => b.height - a.height || b.width - a.width)
+  for (const piece of ordered) {
+    const shelf = shelves.find((candidate) => candidate.usedWidth + piece.width <= fabricWidthCm + 1e-9)
+    if (shelf) shelf.usedWidth += piece.width
+    else shelves.push({ usedWidth: piece.width, height: piece.height })
   }
-  return shelves.reduce((sum, shelf) => sum + shelf.height, 0)
+  return {
+    lengthCm: shelves.reduce((sum, shelf) => sum + shelf.height, 0)
+      + oversized.reduce((sum, piece) => sum + Math.max(piece.width, piece.height), 0),
+    oversized,
+  }
 }
 
-/** Piece-level cutting plan for standard geometry; ambiguous geometry uses diagnosed template blanks. */
-export function calculateDetailedFabric(document: QuiltDocument, language: Language = 'ru'): DetailedFabricEstimate {
+const isDiagonalSquareMethod = (method: RecipeMethod): boolean =>
+  method === 'hst-two-at-a-time' || method === 'qst-two-at-a-time'
+
+const isSquareOnlyRecipeMethod = (method: RecipeMethod): boolean =>
+  isDiagonalSquareMethod(method)
+  || method === 'flying-geese-sew-and-flip'
+  || method === 'flying-geese-no-waste'
+
+const isUnstretchedSquare = (width: number, height: number): boolean =>
+  Math.abs(width - height) <= Math.max(1, width, height) * 1e-6
+
+/** Source-backed cutting plan for built-ins; ambiguous geometry uses diagnosed template blanks. */
+export function calculateDetailedFabric(
+  document: QuiltDocument,
+  language: Language = 'ru',
+  options: DetailedFabricOptions = {},
+): DetailedFabricEstimate {
   const fabricWidthCm = finitePositive(document.fabricWidthCm, 110)
   const backingExtraCm = finiteNonNegative(document.backingExtraCm, 10)
   const bindingWidthCm = finitePositive(document.bindingWidthCm, 6.35)
@@ -1004,58 +1055,85 @@ export function calculateDetailedFabric(document: QuiltDocument, language: Langu
   const pieceCounts = document.palette.map(() => 0)
   const breakdown = new Map<PatternId, { pattern: BlockPattern; count: number; areas: number[] }>()
   const pieceInstructionDrafts = new Map<string, CutPieceInstruction>()
-  const registerCutPiece = (
+  const constructionMethodDrafts = new Map<PatternId, ConstructionMethodSummary>()
+  const registerInstruction = (
     pattern: BlockPattern,
-    paletteIndex: number,
-    points: readonly Point[],
-    blockWidthCm: number,
-    blockHeightCm: number,
-    forceTemplate: boolean,
+    instruction: Omit<CutPieceInstruction, 'color' | 'patternId' | 'patternName'>,
   ) => {
-    if (paletteIndex < 0 || paletteIndex >= document.palette.length) return
-    const xs = points.map(([x]) => x)
-    const ys = points.map(([, y]) => y)
-    const normalizedWidth = Math.max(...xs) - Math.min(...xs)
-    const normalizedHeight = Math.max(...ys) - Math.min(...ys)
-    const finishedWidthCm = forceTemplate ? blockWidthCm : normalizedWidth * blockWidthCm
-    const finishedHeightCm = forceTemplate ? blockHeightCm : normalizedHeight * blockHeightCm
-    const uniqueX = new Set(xs.map((value) => rounded(value, 6))).size
-    const uniqueY = new Set(ys.map((value) => rounded(value, 6))).size
-    const rectangular = points.length === 4 && uniqueX === 2 && uniqueY === 2
-    const triangleUsesDiagonalPair = points.length === 3
-      && points.every(([x, y]) =>
-        (Math.abs(x - Math.min(...xs)) < 1e-9 || Math.abs(x - Math.max(...xs)) < 1e-9)
-        && (Math.abs(y - Math.min(...ys)) < 1e-9 || Math.abs(y - Math.max(...ys)) < 1e-9))
-      && Math.abs(2 * polygonArea(points) - normalizedWidth * normalizedHeight) < 1e-9
-    const shape: CutPieceInstruction['shape'] = forceTemplate
-      ? 'template'
-      : triangleUsesDiagonalPair
-        ? 'triangle'
-        : rectangular && Math.abs(finishedWidthCm - finishedHeightCm) < 1e-6
-          ? 'square'
-          : rectangular
-            ? 'rectangle'
-            : 'template'
-    const cutWidthCm = finishedWidthCm + 2 * DETAILED_SEAM_ALLOWANCE_CM
-    const cutHeightCm = finishedHeightCm + 2 * DETAILED_SEAM_ALLOWANCE_CM
-    const key = [pattern.id, paletteIndex, shape, rounded(cutWidthCm), rounded(cutHeightCm)].join(':')
+    if (instruction.paletteIndex < 0 || instruction.paletteIndex >= document.palette.length) return
+    const key = [
+      pattern.id,
+      instruction.paletteIndex,
+      instruction.method,
+      instruction.role,
+      instruction.shape,
+      rounded(instruction.finishedWidthCm),
+      rounded(instruction.finishedHeightCm),
+      rounded(instruction.cutWidthCm),
+      rounded(instruction.cutHeightCm),
+      instruction.partnerPaletteIndex ?? '',
+      instruction.batchBlankCount ?? '',
+      instruction.batchResultCount ?? '',
+    ].join(':')
     const existing = pieceInstructionDrafts.get(key)
     if (existing) {
-      existing.pieces += 1
+      existing.pieces += instruction.pieces
+      existing.requiredPieces += instruction.requiredPieces
+      existing.rectanglesToCut += instruction.rectanglesToCut
       return
     }
     pieceInstructionDrafts.set(key, {
-      paletteIndex,
-      color: document.palette[paletteIndex],
+      ...instruction,
+      color: document.palette[instruction.paletteIndex],
       patternId: pattern.id,
       patternName: pattern.name,
-      shape,
-      finishedWidthCm: rounded(finishedWidthCm),
-      finishedHeightCm: rounded(finishedHeightCm),
-      cutWidthCm: rounded(cutWidthCm),
-      cutHeightCm: rounded(cutHeightCm),
+      finishedWidthCm: rounded(instruction.finishedWidthCm),
+      finishedHeightCm: rounded(instruction.finishedHeightCm),
+      cutWidthCm: rounded(instruction.cutWidthCm),
+      cutHeightCm: rounded(instruction.cutHeightCm),
+    })
+  }
+  const registerConservativeBlank = (
+    pattern: BlockPattern,
+    paletteIndex: number,
+    blockWidthCm: number,
+    blockHeightCm: number,
+  ) => {
+    registerInstruction(pattern, {
+      paletteIndex,
+      shape: 'template',
+      method: 'template',
+      role: 'template',
+      finishedWidthCm: blockWidthCm,
+      finishedHeightCm: blockHeightCm,
+      cutWidthCm: blockWidthCm + 2 * DETAILED_SEAM_ALLOWANCE_CM,
+      cutHeightCm: blockHeightCm + 2 * DETAILED_SEAM_ALLOWANCE_CM,
       pieces: 1,
+      requiredPieces: 1,
       rectanglesToCut: 1,
+    })
+  }
+  const registerRecipeBlank = (
+    pattern: BlockPattern,
+    blank: ResolvedRecipeBlank,
+    sourceUrl: string,
+  ) => {
+    registerInstruction(pattern, {
+      paletteIndex: blank.paletteIndex,
+      shape: blank.shape,
+      method: blank.method,
+      role: blank.role,
+      finishedWidthCm: blank.finishedWidthCm,
+      finishedHeightCm: blank.finishedHeightCm,
+      cutWidthCm: blank.cutWidthCm,
+      cutHeightCm: blank.cutHeightCm,
+      pieces: blank.resultingPieces,
+      requiredPieces: blank.resultingPieces,
+      batchBlankCount: blank.batchBlankCount,
+      batchResultCount: blank.batchResultCount,
+      rectanglesToCut: blank.blanks,
+      partnerPaletteIndex: blank.partnerPaletteIndex,
+      sourceUrl,
     })
   }
   const mergedChildren = new Map<number, number[]>()
@@ -1110,7 +1188,7 @@ export function calculateDetailedFabric(document: QuiltDocument, language: Langu
           : `${pattern.name}: this geometry cannot be calculated exactly; a conservative full-block estimate was used.`,
       })
     }
-    if (fractions.overlap && !reported.has(`overlap:${pattern.id}`)) {
+    if (custom && fractions.overlap && !reported.has(`overlap:${pattern.id}`)) {
       reported.add(`overlap:${pattern.id}`)
       diagnostics.push({
         code: 'overlapping-shapes',
@@ -1134,34 +1212,113 @@ export function calculateDetailedFabric(document: QuiltDocument, language: Langu
     const width = sizes.columns.slice(minColumn, maxColumn + 1).reduce((sum, size) => sum + size, 0)
     const height = sizes.rows.slice(minRow, maxRow + 1).reduce((sum, size) => sum + size, 0)
     const finishedArea = width * height
+    if (!fractions.unsupported) {
+      const entry = breakdown.get(pattern.id) ?? { pattern, count: 0, areas: [] }
+      entry.count += 1
+      fractions.fractions.forEach((fraction, paletteIndex) => {
+        if (paletteIndex < 0 || paletteIndex >= document.palette.length) return
+        const visible = fraction * finishedArea
+        visibleAreas[paletteIndex] += visible
+        entry.areas[paletteIndex] = (entry.areas[paletteIndex] ?? 0) + visible
+      })
+      breakdown.set(pattern.id, entry)
+    }
+
+    const recipe = builtIn && !custom
+      ? resolveCuttingRecipe(pattern.id, {
+          widthCm: width,
+          heightCm: height,
+          seamCm: DETAILED_SEAM_ALLOWANCE_CM,
+          flyingGeeseMethod: options.flyingGeeseMethod,
+        })
+      : null
+    const squareRecipeOnStretchedBlock = recipe !== null
+      && pattern.id !== 'flying-geese'
+      && (isSquareOnlyRecipeMethod(recipe.method)
+        || recipe.blanks.some(({ method }) => isSquareOnlyRecipeMethod(method)))
+      && !isUnstretchedSquare(width, height)
+    const invalidFlyingGeeseUnit = recipe !== null
+      && pattern.id === 'flying-geese'
+      && recipe.blanks.some(({ method }) => method === 'template')
+    if (invalidFlyingGeeseUnit && !reported.has(`invalid-flying-geese:${pattern.id}`)) {
+      reported.add(`invalid-flying-geese:${pattern.id}`)
+      diagnostics.push({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: pattern.id,
+        message: options.flyingGeeseMethod === 'no-waste'
+          ? language === 'ru'
+            ? `${pattern.name}: для метода Flying Geese без отходов ширина готового блока должна в точности вдвое превышать высоту; использованы полноразмерные шаблонные заготовки.`
+            : `${pattern.name}: the no-waste Flying Geese method requires a finished unit exactly twice as wide as it is tall; full-size template blanks were used.`
+          : language === 'ru'
+            ? `${pattern.name}: ширина готового блока Flying Geese должна в точности вдвое превышать высоту; использованы полноразмерные шаблонные заготовки.`
+            : `${pattern.name}: a finished Flying Geese unit must be exactly twice as wide as it is tall; full-size template blanks were used.`,
+      })
+    }
+    if (squareRecipeOnStretchedBlock && !reported.has(`stretched-recipe:${pattern.id}`)) {
+      reported.add(`stretched-recipe:${pattern.id}`)
+      diagnostics.push({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: pattern.id,
+        message: language === 'ru'
+          ? `${pattern.name}: рецепт HST/QST/Flying Geese применим только к нерастянутому квадратному блоку; использованы консервативные полноразмерные шаблонные заготовки.`
+          : `${pattern.name}: the HST/QST/Flying Geese recipe requires an unstretched square block; conservative full-size template blanks were used.`,
+      })
+    }
+    if (recipe && !squareRecipeOnStretchedBlock) {
+      constructionMethodDrafts.set(pattern.id, {
+        patternId: pattern.id,
+        patternName: pattern.name,
+        method: recipe.method,
+        sourceUrl: recipe.sourceUrl,
+      })
+      recipe.blanks.forEach((blank) => registerRecipeBlank(pattern, blank, recipe.sourceUrl))
+      return
+    }
+
+    if (!recipe && builtIn && !custom && !reported.has(`recipe:${pattern.id}`)) {
+      reported.add(`recipe:${pattern.id}`)
+      diagnostics.push({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: pattern.id,
+        message: language === 'ru'
+          ? `${pattern.name}: рецепт раскроя не найден; использован консервативный план полноразмерных шаблонных заготовок.`
+          : `${pattern.name}: no source-backed cutting recipe was found; a conservative plan of full-size template blanks was used.`,
+      })
+    }
+    if (squareRecipeOnStretchedBlock) {
+      new Set([pattern.background, ...pattern.shapes.map(({ color }) => color)])
+        .forEach((paletteIndex) => registerConservativeBlank(pattern, paletteIndex, width, height))
+      return
+    }
     if (fractions.unsupported) {
-      const fullBlock: readonly Point[] = [[0, 0], [1, 0], [1, 1], [0, 1]]
-      registerCutPiece(pattern, pattern.background, fullBlock, width, height, true)
+      registerConservativeBlank(pattern, pattern.background, width, height)
       pattern.shapes.forEach(({ color }) => {
-        registerCutPiece(pattern, color, fullBlock, width, height, true)
+        registerConservativeBlank(pattern, color, width, height)
       })
       return
     }
-    const entry = breakdown.get(pattern.id) ?? { pattern, count: 0, areas: [] }
-    entry.count += 1
-    fractions.fractions.forEach((fraction, paletteIndex) => {
-      if (paletteIndex < 0 || paletteIndex >= document.palette.length) return
-      const visible = fraction * finishedArea
-      visibleAreas[paletteIndex] += visible
-      entry.areas[paletteIndex] = (entry.areas[paletteIndex] ?? 0) + visible
+    fractions.pieces.forEach(({ color }) => {
+      registerConservativeBlank(pattern, color, width, height)
     })
-    fractions.pieces.forEach(({ color, polygon }) => {
-      registerCutPiece(pattern, color, polygon, width, height, Boolean(custom) || fractions.overlap)
-    })
-    breakdown.set(pattern.id, entry)
   })
 
+  pieceInstructionDrafts.forEach((instruction) => {
+    if (instruction.batchBlankCount !== undefined && instruction.batchResultCount !== undefined) {
+      const batches = Math.ceil(instruction.requiredPieces / instruction.batchResultCount)
+      instruction.rectanglesToCut = batches * instruction.batchBlankCount
+      instruction.pieces = batches * instruction.batchResultCount
+    }
+  })
   const pieceInstructions = [...pieceInstructionDrafts.values()]
-    .map((piece): CutPieceInstruction => ({
-      ...piece,
-      rectanglesToCut: piece.shape === 'triangle' ? Math.ceil(piece.pieces / 2) : piece.pieces,
-    }))
-    .sort((left, right) => left.paletteIndex - right.paletteIndex || left.patternName.localeCompare(right.patternName, 'ru'))
+    .sort((left, right) =>
+      left.paletteIndex - right.paletteIndex
+      || left.patternName.localeCompare(right.patternName, 'ru')
+      || left.role.localeCompare(right.role)
+      || left.cutWidthCm - right.cutWidthCm
+      || left.cutHeightCm - right.cutHeightCm)
   pieceInstructions.forEach((piece) => {
     const paletteIndex = piece.paletteIndex
     const blankAreaCm2 = piece.rectanglesToCut * piece.cutWidthCm * piece.cutHeightCm
@@ -1172,10 +1329,22 @@ export function calculateDetailedFabric(document: QuiltDocument, language: Langu
     }
   })
 
-
   const cutting = document.palette.flatMap((color, paletteIndex): CuttingSummary[] => {
     if (cuttingAreas[paletteIndex] <= 1e-10) return []
-    const packedLengthCm = packAcrossWidth(packingPieces[paletteIndex], fabricWidthCm)
+    const packing = packAcrossWidth(packingPieces[paletteIndex], fabricWidthCm)
+    packing.oversized.forEach((piece) => {
+      const reportKey = `oversize:${paletteIndex}:${rounded(piece.width)}:${rounded(piece.height)}`
+      if (reported.has(reportKey)) return
+      reported.add(reportKey)
+      diagnostics.push({
+        code: 'oversize-blank',
+        severity: 'warning',
+        message: language === 'ru'
+          ? `Заготовка ${rounded(piece.width)} × ${rounded(piece.height)} см для цвета «${color}» не помещается по ширине ткани ни в одной ориентации; в требуемую длину заложена её длинная сторона.`
+          : `The ${rounded(piece.width)} × ${rounded(piece.height)} cm blank for color “${color}” cannot fit across the fabric in either orientation; its long dimension was charged as required length.`,
+      })
+    })
+    const packedLengthCm = packing.lengthCm
     const purchaseMeters = metersRoundedUp(packedLengthCm * 1.1)
     const purchasedAreaCm2 = purchaseMeters * 100 * fabricWidthCm
     return [{
@@ -1243,6 +1412,7 @@ export function calculateDetailedFabric(document: QuiltDocument, language: Langu
     }),
     cutting,
     pieceInstructions,
+    constructionMethods: [...constructionMethodDrafts.values()],
     diagnostics,
   }
 }

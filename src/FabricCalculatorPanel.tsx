@@ -11,6 +11,7 @@ import {
   type FabricDiagnostic,
   type QuiltDocument,
 } from './editorModel'
+import type { FlyingGeeseMethod } from './cuttingRecipes'
 import { usePreferences } from './i18n'
 import './calculator.css'
 
@@ -21,6 +22,12 @@ export interface FabricCalculatorPanelProps {
 type TabId = 'blocks' | 'backing' | 'binding'
 
 const TAB_IDS: readonly TabId[] = ['blocks', 'backing', 'binding']
+
+const FLYING_GEESE_PATTERN_IDS: Record<string, true> = {
+  'flying-geese': true,
+  'sawtooth-star': true,
+  'dutchmans-puzzle': true,
+}
 
 function ColorSwatch({ color }: { color: string }) {
   return <span className="calculator-swatch" style={{ backgroundColor: color }} aria-hidden="true" />
@@ -110,20 +117,23 @@ function ShoppingList({ result }: { result: DetailedFabricEstimate }) {
         <span className="calculator-reserve">{text('Запас', 'Reserve')} {result.purchaseReservePercent}%</span>
       </div>
       <p className="calculator-work-section__intro">{text(
-        '«Купить» — рекомендация модели с запасом и округлением до доступной длины ткани.',
-        '“Buy” is the model recommendation including reserve and purchase-length rounding.',
+        'Количество ткани рассчитано по фактическим заготовкам для выбранных методов сборки; «Купить» включает отходы раскладки, запас и округление до доступной длины.',
+        'Fabric quantities are based on the actual blanks required by the selected construction methods; “Buy” includes layout offcuts, reserve, and purchase-length rounding.',
       )}</p>
 
       <ol className="calculator-shopping-list">
         {result.cutting.map((summary) => {
           const visibleArea = result.topByColor.find((estimate) => estimate.paletteIndex === summary.paletteIndex)?.visibleAreaCm2
+          const blankCount = result.pieceInstructions
+            .filter((piece) => piece.paletteIndex === summary.paletteIndex)
+            .reduce((total, piece) => total + piece.rectanglesToCut, 0)
           return (
             <li className="calculator-purchase" key={summary.paletteIndex}>
               <div className="calculator-purchase__identity">
                 <ColorSwatch color={summary.color} />
                 <div>
                   <b>{text('Ткань', 'Fabric')} {summary.paletteIndex + 1}</b>
-                  <span>{summary.pieces} {text('шт. деталей', 'pieces')}</span>
+                  <span>{blankCount} {text('шт. заготовок для кроя', 'cut blanks')}</span>
                 </div>
               </div>
               <div className="calculator-purchase__amount">
@@ -159,34 +169,170 @@ function ShoppingList({ result }: { result: DetailedFabricEstimate }) {
   )
 }
 
+type ConstructionMethod = DetailedFabricEstimate['constructionMethods'][number]['method']
+
+function ConstructionMethods({ result }: { result: DetailedFabricEstimate }) {
+  const { patternName, text } = usePreferences()
+  if (result.constructionMethods.length === 0) return null
+
+  const methodName = (method: ConstructionMethod) => ({
+    direct: text('Прямой крой', 'Direct cutting'),
+    'strip-piecing': text('Сборка из полос', 'Strip piecing'),
+    'hst-two-at-a-time': text('HST: две за раз', 'HST: two at a time'),
+    'qst-two-at-a-time': text('QST: две за раз', 'QST: two at a time'),
+    'flying-geese-sew-and-flip': text('«Летящие гуси»: по одному', 'Flying Geese: one at a time'),
+    'flying-geese-no-waste': text('«Летящие гуси»: четыре без отходов', 'Flying Geese: four at a time, no waste'),
+    template: text('Крой по шаблону', 'Template cutting'),
+    'paper-piecing': text('Шитьё по бумажной основе', 'Foundation paper piecing'),
+    'english-paper-piecing': text('Английская техника по бумаге', 'English paper piecing'),
+  })[method]
+
+  const methodExplanation = (method: ConstructionMethod) => ({
+    direct: text(
+      'Детали выкраиваются сразу по указанным размерам заготовок.',
+      'Pieces are cut directly at the listed blank dimensions.',
+    ),
+    'strip-piecing': text(
+      'Полосы сшиваются в набор, который затем разрезается поперёк на элементы блока.',
+      'Strips are joined into a set, then subcut into block units.',
+    ),
+    'hst-two-at-a-time': text(
+      'Из пары квадратов получают две одинаковые HST-детали.',
+      'A pair of squares makes two matching HST units.',
+    ),
+    'qst-two-at-a-time': text(
+      'Два этапа диагонального шитья дают парные QST-детали.',
+      'Two diagonal sewing stages make matching QST units.',
+    ),
+    'flying-geese-sew-and-flip': text(
+      'Один прямоугольник корпуса и два угловых квадрата дают одного «гуся». Метод подходит для любого количества и смешанных углов.',
+      'One body rectangle and two corner squares make one goose. This works for any quantity and mixed corner fabrics.',
+    ),
+    'flying-geese-no-waste': text(
+      'Один большой квадрат корпуса и четыре малых угловых квадрата дают сразу четырёх «гусей» формата 2:1 без отходов. Количество округляется до партий по четыре.',
+      'One large body square and four small corner squares make four 2:1 geese with no waste. Quantities round up to batches of four.',
+    ),
+    template: text(
+      'Полноразмерный шаблон с припуском задаёт окончательную линию кроя внутри заготовки-конверта.',
+      'A full-size template with seam allowance defines the final cut inside each envelope blank.',
+    ),
+    'paper-piecing': text(
+      'Заготовка-конверт даёт запас для шитья по бумажной основе и последующего подравнивания.',
+      'Each envelope blank provides excess for foundation paper piecing and final trimming.',
+    ),
+    'english-paper-piecing': text(
+      'Ткань оборачивается вокруг бумажных шаблонов, затем подготовленные детали сшиваются вручную.',
+      'Fabric is wrapped around paper templates before the prepared pieces are joined by hand.',
+    ),
+  })[method]
+
+  const methodSteps = (method: ConstructionMethod): readonly string[] => ({
+    direct: [
+      text('Выкроите заготовки по указанным размерам.', 'Cut the blanks at the listed dimensions.'),
+      text('Разложите детали по схеме блока и сшейте их с указанным припуском.', 'Arrange the pieces as shown in the block and sew with the stated seam allowance.'),
+    ],
+    'strip-piecing': [
+      text('Сшейте выкроенные полосы вдоль длинных сторон в набор.', 'Join the cut strips along their long edges to make a strip set.'),
+      text('Заутюжьте швы и разрежьте набор поперёк на элементы блока.', 'Press the seams and subcut the set into block units.'),
+      text('Соберите элементы по схеме блока.', 'Assemble the units as shown in the block.'),
+    ],
+    'hst-two-at-a-time': [
+      text('Сложите два квадрата лицевыми сторонами вместе и отметьте диагональ.', 'Place two squares right sides together and mark a diagonal.'),
+      text('Проложите строчки по обе стороны от линии, разрежьте по линии и разутюжьте.', 'Sew on both sides of the line, cut on the line, and press open.'),
+      text('Подравняйте две HST-детали до готового размера.', 'Trim the two HST units to size.'),
+    ],
+    'qst-two-at-a-time': [
+      text('Сначала получите пары HST: прошейте по обе стороны диагонали, разрежьте и разутюжьте.', 'First make HST pairs: sew on both sides of a diagonal, cut, and press.'),
+      text('Сложите HST лицевыми сторонами вместе, совместив швы, и отметьте вторую диагональ.', 'Pair the HSTs right sides together with opposing seams and mark the second diagonal.'),
+      text('Снова прошейте с обеих сторон, разрежьте по линии, разутюжьте и подравняйте QST.', 'Sew on both sides again, cut on the line, press, and trim the QST units.'),
+    ],
+    'flying-geese-sew-and-flip': [
+      text('Выкроите прямоугольники корпуса и угловые квадраты по размерам ниже.', 'Cut the body rectangles and corner squares at the sizes listed below.'),
+      text('Проведите диагональ на изнанке одного углового квадрата.', 'Draw a diagonal on the wrong side of one corner square.'),
+      text('Положите квадрат лицом к лицу на один конец прямоугольника корпуса.', 'Place the square right sides together on one end of the body rectangle.'),
+      text('Проложите строчку точно ПО отмеченной диагонали.', 'Sew directly ON the marked diagonal.'),
+      text('Только после шитья обрежьте внешний угол, оставив припуск на шов.', 'Only after sewing, trim away the outer corner, leaving the seam allowance.'),
+      text('Заутюжьте получившийся треугольник наружу.', 'Press the resulting triangle open.'),
+      text('Повторите те же действия со вторым квадратом на другом конце прямоугольника.', 'Repeat with the second square on the other end of the rectangle.'),
+    ],
+    'flying-geese-no-waste': [
+      text('Проведите диагональ на изнанке каждого из четырёх малых угловых квадратов.', 'Mark a diagonal on the wrong side of each of the four small corner squares.'),
+      text('Положите два малых квадрата лицом к лицу на противоположные углы большого квадрата корпуса.', 'Place two small squares right sides together on opposite corners of the large body square.'),
+      text('Проложите строчки с обеих сторон отмеченной линии.', 'Sew on both sides of the marked line.'),
+      text('Разрежьте по линии и заутюжьте треугольники наружу.', 'Cut on the line and press the triangles open.'),
+      text('Добавьте по одному из оставшихся квадратов к каждой получившейся детали.', 'Add one remaining square to each resulting unit.'),
+      text('Снова прошейте с обеих сторон диагонали, разрежьте по линии и заутюжьте.', 'Sew on both sides of the diagonal again, cut on the line, and press.'),
+      text('Подравняйте четыре готовых «летящих гуся».', 'Trim the four finished Flying Geese units.'),
+    ],
+    template: [
+      text('Поместите полноразмерный шаблон с припуском внутри каждой заготовки-конверта.', 'Place the full-size template with seam allowance inside each envelope blank.'),
+      text('Выкроите деталь по шаблону и соберите блок по схеме.', 'Cut the piece to the template and assemble the block as shown.'),
+    ],
+    'paper-piecing': [
+      text('Расположите заготовки на бумажной основе в порядке нумерации.', 'Place the blanks on the paper foundation in numbered order.'),
+      text('Пришейте и отогните каждую следующую деталь, затем подравняйте готовый элемент по шаблону.', 'Sew and flip each following piece, then trim the completed unit to the template.'),
+    ],
+    'english-paper-piecing': [
+      text('Оберните ткань вокруг бумажных шаблонов и закрепите припуски.', 'Wrap the fabric around the paper templates and secure the seam allowances.'),
+      text('Сшейте подготовленные детали вручную потайными стежками.', 'Join the prepared pieces by hand with concealed stitches.'),
+    ],
+  })[method]
+
+  return (
+    <section className="calculator-methods" aria-labelledby="construction-methods-heading">
+      <div className="calculator-methods__heading">
+        <div>
+          <p className="calculator-section-kicker">{text('Рецепт кроя', 'Cutting recipe')}</p>
+          <h4 id="construction-methods-heading">{text('Методы сборки', 'Construction methods')}</h4>
+        </div>
+        <p>{text(
+          'Эти способы определяют размеры и количество заготовок ниже.',
+          'These methods determine the blank sizes and quantities below.',
+        )}</p>
+      </div>
+      <ul className="calculator-method-grid">
+        {result.constructionMethods.map((summary) => (
+          <li className="calculator-method-card" key={`${summary.patternId}-${summary.method}`}>
+            <h5>{patternName(summary.patternId, summary.patternName)}</h5>
+            <span className="calculator-method-card__method">{methodName(summary.method)}</span>
+            <a href={summary.sourceUrl} target="_blank" rel="noopener noreferrer">
+              {text('Источник метода', 'Method source')}
+              <span aria-hidden="true">↗</span>
+            </a>
+            <details className="calculator-method-disclosure">
+              <summary>{text('Как сшить', 'How to sew')}</summary>
+              <p>{methodExplanation(summary.method)}</p>
+              <ol>
+                {methodSteps(summary.method).map((step, index) => <li key={index}>{step}</li>)}
+              </ol>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function PieceFacts({ piece }: { piece: CutPieceInstruction }) {
   const { formatLength, text } = usePreferences()
   const formatDimensions = (widthCm: number, heightCm: number) => `${formatLength(widthCm)} × ${formatLength(heightCm)}`
 
-  if (piece.shape === 'triangle') {
-    return (
-      <dl className="calculator-cut-step__facts">
-        <div><dt>{text('Заготовки', 'Blanks')}</dt><dd>{piece.rectanglesToCut} {text('шт.', 'pcs.')} · {formatDimensions(piece.cutWidthCm, piece.cutHeightCm)}</dd></div>
-        <div><dt>{text('После диагонального разреза', 'After diagonal cutting')}</dt><dd>{piece.pieces} {text('шт.', 'pcs.')}</dd></div>
-        <div><dt>{text('Готовая деталь', 'Finished piece')}</dt><dd>{formatDimensions(piece.finishedWidthCm, piece.finishedHeightCm)}</dd></div>
-      </dl>
-    )
-  }
-
-  if (piece.shape === 'template') {
-    return (
-      <dl className="calculator-cut-step__facts">
-        <div><dt>{text('Вырезать по шаблону', 'Cut with template')}</dt><dd>{piece.pieces} {text('шт.', 'pcs.')}</dd></div>
-        <div><dt>{text('Готовая деталь', 'Finished piece')}</dt><dd>{formatDimensions(piece.finishedWidthCm, piece.finishedHeightCm)}</dd></div>
-        <div><dt>{text('Габарит шаблона с припуском', 'Template size with seam allowance')}</dt><dd>{formatDimensions(piece.cutWidthCm, piece.cutHeightCm)}</dd></div>
-      </dl>
-    )
-  }
-
   return (
     <dl className="calculator-cut-step__facts">
-      <div><dt>{text('Крой с припуском', 'Cut with seam allowance')}</dt><dd>{piece.pieces} {text('шт.', 'pcs.')} · {formatDimensions(piece.cutWidthCm, piece.cutHeightCm)}</dd></div>
-      <div><dt>{text('Готовая деталь', 'Finished piece')}</dt><dd>{formatDimensions(piece.finishedWidthCm, piece.finishedHeightCm)}</dd></div>
+      <div><dt>{text('Заготовки для кроя', 'Cut blanks')}</dt><dd>{piece.rectanglesToCut} {text('шт.', 'pcs.')}</dd></div>
+      <div><dt>{text('Размер заготовки', 'Blank dimensions')}</dt><dd>{formatDimensions(piece.cutWidthCm, piece.cutHeightCm)}</dd></div>
+      <div><dt>{text('Получится деталей', 'Resulting pieces')}</dt><dd>{piece.pieces} {text('шт.', 'pcs.')}</dd></div>
+      {piece.requiredPieces !== piece.pieces && (
+        <div>
+          <dt>{text('Нужно для квилта', 'Needed for quilt')}</dt>
+          <dd>
+            {piece.requiredPieces} {text('шт.', 'pcs.')}
+            {' · '}
+            {text('останется', 'extra')} {piece.pieces - piece.requiredPieces}
+          </dd>
+        </div>
+      )}
+      <div><dt>{text('Готовый размер', 'Finished dimensions')}</dt><dd>{formatDimensions(piece.finishedWidthCm, piece.finishedHeightCm)}</dd></div>
     </dl>
   )
 }
@@ -195,44 +341,109 @@ function FabricCutGroup({
   summary,
   pieces,
   fabricWidthCm,
-  seamAllowanceCm,
 }: {
   summary: CuttingSummary
   pieces: readonly CutPieceInstruction[]
   fabricWidthCm: number
-  seamAllowanceCm: number
 }) {
   const { formatArea, formatFabricLength, formatLength, patternName, text } = usePreferences()
   const formatDimensions = (widthCm: number, heightCm: number) => `${formatLength(widthCm)} × ${formatLength(heightCm)}`
-  const shapeLabel = (shape: CutPieceInstruction['shape']) => ({
-    square: text('Квадрат', 'Square'),
-    rectangle: text('Прямоугольник', 'Rectangle'),
-    triangle: text('Треугольник', 'Triangle'),
-    template: text('По шаблону', 'Template'),
-  })[shape]
+  const roleLabel = (role: CutPieceInstruction['role']) => ({
+    square: text('Квадратная заготовка', 'Square blank'),
+    rectangle: text('Прямоугольная заготовка', 'Rectangle blank'),
+    strip: text('Полоса', 'Strip'),
+    'hst-square': text('Квадраты для HST', 'HST squares'),
+    'qst-square': text('Квадраты для QST', 'QST squares'),
+    'goose-body': text('Корпус «летящего гуся»', 'Flying Geese body'),
+    'goose-corner': text('Угловые квадраты', 'Corner squares'),
+    template: text('Деталь по шаблону', 'Template piece'),
+    blade: text('Лопасть', 'Blade'),
+    hexagon: text('Шестиугольник', 'Hexagon'),
+  })[role]
   const cuttingInstruction = (piece: CutPieceInstruction) => {
     const dimensions = formatDimensions(piece.cutWidthCm, piece.cutHeightCm)
-    const localizedPatternName = patternName(piece.patternId, piece.patternName)
-    if (piece.shape === 'triangle') {
-      return piece.pieces % 2 === 0
-        ? text(
-          `Выкроить ${piece.rectanglesToCut} прямоугольных заготовок ${dimensions}; разрезать каждую по диагонали — получится ${piece.pieces} треугольных деталей.`,
-          `Cut ${piece.rectanglesToCut} rectangular blanks at ${dimensions}; cut each diagonally to make ${piece.pieces} triangular pieces.`,
-        )
-        : text(
-          `Выкроить ${piece.rectanglesToCut} прямоугольных заготовок ${dimensions}; разрезать каждую по диагонали, использовать ${piece.pieces} из ${piece.rectanglesToCut * 2} треугольных деталей.`,
-          `Cut ${piece.rectanglesToCut} rectangular blanks at ${dimensions}; cut each diagonally and use ${piece.pieces} of the ${piece.rectanglesToCut * 2} triangular pieces.`,
-        )
-    }
-    if (piece.shape === 'template') {
+
+    if (
+      piece.patternId === 'card-trick'
+      && piece.partnerPaletteIndex === undefined
+      && piece.method === 'hst-two-at-a-time'
+    ) {
       return text(
-        `Подготовить ${piece.rectanglesToCut} прямоугольных заготовок ${dimensions}; выкроить ${piece.pieces} деталей по шаблону «${localizedPatternName}» с припуском ${formatLength(seamAllowanceCm)}.`,
-        `Prepare ${piece.rectanglesToCut} rectangular blanks at ${dimensions}; cut ${piece.pieces} pieces with the “${localizedPatternName}” template, including a ${formatLength(seamAllowanceCm)} seam allowance.`,
+        `Выкроить ${piece.rectanglesToCut} родительских квадратов ${dimensions}; каждый разрезать один раз по диагонали.`,
+        `Cut ${piece.rectanglesToCut} parent squares at ${dimensions}; cut each once on the diagonal.`,
       )
     }
+    if (
+      piece.patternId === 'card-trick'
+      && piece.partnerPaletteIndex === undefined
+      && piece.method === 'qst-two-at-a-time'
+    ) {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} родительских квадратов ${dimensions}; каждый разрезать по обеим диагоналям.`,
+        `Cut ${piece.rectanglesToCut} parent squares at ${dimensions}; cut each on both diagonals.`,
+      )
+    }
+    if (piece.method === 'hst-two-at-a-time') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} квадратных заготовок HST ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} HST square blanks at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'qst-two-at-a-time') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} квадратных заготовок QST ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} QST square blanks at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'flying-geese-sew-and-flip' && piece.role === 'goose-body') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} прямоугольных заготовок корпуса ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} body rectangles at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'flying-geese-sew-and-flip' && piece.role === 'goose-corner') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} угловых квадратов ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} corner squares at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'flying-geese-no-waste' && piece.role === 'goose-body') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} больших квадратов корпуса ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} large body squares at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'flying-geese-no-waste' && piece.role === 'goose-corner') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} малых угловых квадратов ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} small corner squares at ${dimensions}.`,
+      )
+    }
+    if (piece.method === 'strip-piecing') {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} полос-заготовок ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} strip blanks at ${dimensions}.`,
+      )
+    }
+    if (
+      piece.method === 'template'
+      || piece.method === 'paper-piecing'
+      || piece.method === 'english-paper-piecing'
+    ) {
+      return text(
+        `Выкроить ${piece.rectanglesToCut} консервативных заготовок-конвертов ${dimensions}.`,
+        `Cut ${piece.rectanglesToCut} conservative envelope blanks at ${dimensions}.`,
+      )
+    }
+
+    const blankKind = piece.role === 'square'
+      ? text('квадратных заготовок', 'square blanks')
+      : piece.role === 'strip'
+        ? text('полос-заготовок', 'strip blanks')
+        : text('прямоугольных заготовок', 'rectangular blanks')
     return text(
-      `Выкроить ${piece.pieces} ${piece.shape === 'square' ? 'квадратных' : 'прямоугольных'} деталей ${dimensions}.`,
-      `Cut ${piece.pieces} ${piece.shape === 'square' ? 'square' : 'rectangular'} pieces at ${dimensions}.`,
+      `Выкроить ${piece.rectanglesToCut} ${blankKind} ${dimensions}.`,
+      `Cut ${piece.rectanglesToCut} ${blankKind} at ${dimensions}.`,
     )
   }
 
@@ -243,7 +454,7 @@ function FabricCutGroup({
           <ColorSwatch color={summary.color} />
           <div>
             <h4>{text('Ткань', 'Fabric')} {summary.paletteIndex + 1}</h4>
-            <span>{summary.pieces} {text('шт. деталей', 'pieces')}</span>
+            <span>{pieces.reduce((total, piece) => total + piece.rectanglesToCut, 0)} {text('шт. заготовок для кроя', 'cut blanks')}</span>
           </div>
         </div>
         <strong>{formatFabricLength(summary.purchaseMeters)}</strong>
@@ -259,7 +470,7 @@ function FabricCutGroup({
             <li key={`${piece.patternId}-${piece.shape}-${piece.paletteIndex}-${index}`}>
               <div className="calculator-cut-step__heading">
                 <div>
-                  <span className="calculator-shape-label">{shapeLabel(piece.shape)}</span>
+                  <span className="calculator-shape-label">{roleLabel(piece.role)}</span>
                   <h5>{patternName(piece.patternId, piece.patternName)}</h5>
                 </div>
               </div>
@@ -315,6 +526,7 @@ function CuttingGuide({ result }: { result: DetailedFabricEstimate }) {
           )}</small>
         </div>
       </div>
+      <ConstructionMethods result={result} />
       <div className="calculator-cut-groups">
         {result.cutting.map((summary) => (
           <FabricCutGroup
@@ -322,7 +534,6 @@ function CuttingGuide({ result }: { result: DetailedFabricEstimate }) {
             summary={summary}
             pieces={result.pieceInstructions.filter((piece) => piece.paletteIndex === summary.paletteIndex)}
             fabricWidthCm={result.fabricWidthCm}
-            seamAllowanceCm={result.seamAllowanceCm}
           />
         ))}
       </div>
@@ -405,11 +616,89 @@ function Binding({ estimate, fabricWidthCm }: { estimate: BindingEstimate; fabri
   )
 }
 
+function FlyingGeeseMethodSelector({
+  id,
+  value,
+  onChange,
+}: {
+  id: string
+  value: FlyingGeeseMethod
+  onChange: (method: FlyingGeeseMethod) => void
+}) {
+  const { text } = usePreferences()
+  const options: readonly {
+    id: FlyingGeeseMethod
+    title: string
+    description: string
+  }[] = [
+    {
+      id: 'sew-and-flip',
+      title: text('По одному', 'One at a time'),
+      description: text(
+        'Подходит для любого количества и углов из разных тканей.',
+        'Works for any quantity and mixed corner fabrics.',
+      ),
+    },
+    {
+      id: 'no-waste',
+      title: text('Четыре за раз, без отходов', 'Four at a time, no waste'),
+      description: text(
+        'Эффективно для деталей 2:1; количество округляется до партий по четыре.',
+        'Efficient for 2:1 units; quantities round up to batches of four.',
+      ),
+    },
+  ]
+
+  return (
+    <section className="calculator-geese-method" aria-labelledby={`${id}-heading`}>
+      <div className="calculator-geese-method__heading">
+        <p className="calculator-section-kicker">{text('Выберите способ', 'Choose a method')}</p>
+        <h3 id={`${id}-heading`}>{text('Как собрать «летящих гусей»', 'How to make Flying Geese')}</h3>
+      </div>
+      <fieldset>
+        <legend className="visually-hidden">{text('Метод сборки «летящих гусей»', 'Flying Geese construction method')}</legend>
+        <div className="calculator-geese-method__options">
+          {options.map((option) => (
+            <label
+              className={value === option.id ? 'is-selected' : undefined}
+              key={option.id}
+            >
+              <input
+                type="radio"
+                name={`${id}-option`}
+                value={option.id}
+                checked={value === option.id}
+                onChange={() => onChange(option.id)}
+              />
+              <span>
+                <strong>{option.title}</strong>
+                <small>{option.description}</small>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <p className="calculator-geese-method__note">{text(
+        'Выбор сразу обновляет раскрой, расход ткани и количество для покупки.',
+        'Your choice immediately updates cuts, fabric area, and purchase quantities.',
+      )}</p>
+    </section>
+  )
+}
+
 export function FabricCalculatorPanel({ document }: FabricCalculatorPanelProps) {
   const { language, text } = usePreferences()
   const [activeTab, setActiveTab] = useState<TabId>('blocks')
+  const [flyingGeeseMethod, setFlyingGeeseMethod] = useState<FlyingGeeseMethod>('sew-and-flip')
   const tabGroupId = useId()
-  const result = useMemo(() => calculateDetailedFabric(document, language), [document, language])
+  const hasFlyingGeeseConstruction = useMemo(
+    () => document.cells.some((cell) => Boolean(FLYING_GEESE_PATTERN_IDS[cell.patternId])),
+    [document.cells],
+  )
+  const result = useMemo(
+    () => calculateDetailedFabric(document, language, { flyingGeeseMethod }),
+    [document, language, flyingGeeseMethod],
+  )
   const tabs: readonly { id: TabId; label: string }[] = TAB_IDS.map((id) => ({
     id,
     label: id === 'blocks'
@@ -438,10 +727,18 @@ export function FabricCalculatorPanel({ document }: FabricCalculatorPanelProps) 
         <p className="calculator-eyebrow">{text('План материалов и кроя', 'Materials and cutting plan')}</p>
         <h2 className="fabric-calculator__heading" id={`${tabGroupId}-heading`}>{text('Калькулятор ткани', 'Fabric calculator')}</h2>
         <p className="fabric-calculator__intro">{text(
-          'Покупка и раскрой по вашему квилту — в порядке работы.',
-          'Fabric purchases and cutting for your quilt, in working order.',
+          `Покупка и раскрой по вашему квилту — в порядке работы. Итоги покупки включают отходы, необходимые для выбранных методов сборки, и запас ${result.purchaseReservePercent}%.`,
+          `Fabric purchases and cutting for your quilt, in working order. Purchase totals include offcuts required by the selected construction methods and a ${result.purchaseReservePercent}% reserve.`,
         )}</p>
       </header>
+
+      {hasFlyingGeeseConstruction && (
+        <FlyingGeeseMethodSelector
+          id={`${tabGroupId}-flying-geese-method`}
+          value={flyingGeeseMethod}
+          onChange={setFlyingGeeseMethod}
+        />
+      )}
 
       <Diagnostics diagnostics={result.diagnostics} document={document} />
       <ShoppingList result={result} />

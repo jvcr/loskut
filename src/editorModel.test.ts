@@ -247,12 +247,21 @@ describe('detailed fabric calculation', () => {
       cutHeightCm: 21.27,
       pieces: 1,
       rectanglesToCut: 1,
+      method: 'direct',
+      role: 'rectangle',
+      sourceUrl: expect.stringMatching(/^https:\/\//),
     })])
     expect(estimate.pieceInstructions[0]).not.toHaveProperty('instruction')
+    expect(estimate.constructionMethods).toEqual([{
+      patternId: 'solid',
+      patternName: 'Однотонный',
+      method: 'direct',
+      sourceUrl: expect.stringMatching(/^https:\/\//),
+    }])
     expect(estimate.diagnostics).toEqual([])
   })
 
-  it('accounts for every physical piece and internal seam in a nine-patch cutting plan', () => {
+  it('accounts for every source-backed strip blank in a nine-patch cutting plan', () => {
     const base = {
       ...createDocument(1, 1),
       blockSizeCm: 30,
@@ -277,6 +286,13 @@ describe('detailed fabric calculation', () => {
       { paletteIndex: 0, pieces: 4, cuttingAreaCm2: 508.052, packedLengthCm: 11.27, purchaseMeters: 0.2 },
       { paletteIndex: 1, pieces: 5, cuttingAreaCm2: 635.064, packedLengthCm: 11.27, purchaseMeters: 0.2 },
     ])
+    expect(ninePatch.pieceInstructions.reduce((sum, instruction) => sum + instruction.rectanglesToCut, 0)).toBe(6)
+    expect(ninePatch.pieceInstructions.every(({ method, role }) =>
+      method === 'strip-piecing' && role === 'strip')).toBe(true)
+    expect(ninePatch.constructionMethods).toEqual([expect.objectContaining({
+      patternId: 'nine-patch',
+      method: 'strip-piecing',
+    })])
 
     ninePatch.cutting.forEach((color) => {
       const instructedBlankArea = ninePatch.pieceInstructions
@@ -287,7 +303,7 @@ describe('detailed fabric calculation', () => {
     })
   })
 
-  it('turns half-square triangles into diagonal cutting instructions with seam allowances', () => {
+  it('batches source-backed two-at-a-time HST square blanks across identical cells', () => {
     const document = {
       ...createDocument(1, 2),
       cells: [
@@ -296,18 +312,372 @@ describe('detailed fabric calculation', () => {
       ],
     }
     const estimate = calculateDetailedFabric(document)
-    const triangles = estimate.pieceInstructions.filter(({ shape }) => shape === 'triangle')
+    const hstSquares = estimate.pieceInstructions.filter(({ role }) => role === 'hst-square')
 
-    expect(triangles).toHaveLength(2)
-    expect(triangles.every(({ pieces, rectanglesToCut, cutWidthCm, cutHeightCm }) =>
-      pieces === 2
+    expect(hstSquares).toHaveLength(2)
+    expect(hstSquares.every(({
+      shape,
+      method,
+      pieces,
+      rectanglesToCut,
+      cutWidthCm,
+      cutHeightCm,
+      partnerPaletteIndex,
+      sourceUrl,
+    }) =>
+      shape === 'square'
+      && method === 'hst-two-at-a-time'
+      && pieces === 2
       && rectanglesToCut === 1
-      && cutWidthCm === 26.27
-      && cutHeightCm === 26.27)).toBe(true)
+      && cutWidthCm === 27.223
+      && cutHeightCm === 27.223
+      && partnerPaletteIndex !== undefined
+      && sourceUrl?.startsWith('https://'))).toBe(true)
     estimate.cutting.forEach((color) => {
-      expect(color.cuttingAreaCm2).toBeCloseTo(26.27 * 26.27, 3)
-      expect(color.packedLengthCm).toBe(26.27)
+      expect(color.cuttingAreaCm2).toBeCloseTo(27.223 * 27.223, 3)
+      expect(color.packedLengthCm).toBe(27.223)
     })
+  })
+
+  it('reports one required HST while exposing both units produced by its batch', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      cells: [{ patternId: 'hst', rotation: 0 as const }],
+    })
+    const hstSquares = estimate.pieceInstructions.filter(({ role }) => role === 'hst-square')
+
+    expect(hstSquares).toHaveLength(2)
+    expect(hstSquares.every(({
+      requiredPieces,
+      pieces,
+      rectanglesToCut,
+      batchBlankCount,
+      batchResultCount,
+    }) =>
+      requiredPieces === 1
+      && pieces === 2
+      && rectanglesToCut === 1
+      && batchBlankCount === 1
+      && batchResultCount === 2)).toBe(true)
+  })
+
+  it('aggregates four Hourglass units into one source-correct three-color batch', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 4),
+      cells: Array.from({ length: 4 }, () => ({
+        patternId: 'hourglass',
+        rotation: 0 as const,
+      })),
+    })
+    const qstSquares = estimate.pieceInstructions.filter(({ role }) => role === 'qst-square')
+
+    expect(qstSquares).toHaveLength(3)
+    expect(qstSquares.map(({
+      paletteIndex,
+      requiredPieces,
+      pieces,
+      rectanglesToCut,
+      batchBlankCount,
+      batchResultCount,
+    }) => ({
+      paletteIndex,
+      requiredPieces,
+      pieces,
+      rectanglesToCut,
+      batchBlankCount,
+      batchResultCount,
+    }))).toEqual([
+      {
+        paletteIndex: 0,
+        requiredPieces: 4,
+        pieces: 4,
+        rectanglesToCut: 1,
+        batchBlankCount: 1,
+        batchResultCount: 4,
+      },
+      {
+        paletteIndex: 1,
+        requiredPieces: 4,
+        pieces: 4,
+        rectanglesToCut: 2,
+        batchBlankCount: 2,
+        batchResultCount: 4,
+      },
+      {
+        paletteIndex: 2,
+        requiredPieces: 4,
+        pieces: 4,
+        rectanglesToCut: 1,
+        batchBlankCount: 1,
+        batchResultCount: 4,
+      },
+    ])
+  })
+
+  it('uses Card Trick parent-square batch records for both diagonal cuts', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      cells: [{ patternId: 'card-trick', rotation: 0 as const }],
+    })
+    const standaloneParents = estimate.pieceInstructions.filter(({
+      role,
+      partnerPaletteIndex,
+    }) => (role === 'hst-square' || role === 'qst-square')
+      && partnerPaletteIndex === undefined)
+
+    expect(standaloneParents.filter(({ batchResultCount }) => batchResultCount === 2))
+      .toHaveLength(2)
+    expect(standaloneParents.filter(({ batchResultCount }) => batchResultCount === 4))
+      .toHaveLength(3)
+    expect(standaloneParents.every(({
+      requiredPieces,
+      pieces,
+      rectanglesToCut,
+      batchBlankCount,
+      batchResultCount,
+    }) =>
+      requiredPieces === batchResultCount
+      && pieces === batchResultCount
+      && rectanglesToCut === 1
+      && batchBlankCount === 1)).toBe(true)
+  })
+
+  it('exposes the two extra Jacob’s Ladder strip-pieced units', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      cells: [{ patternId: 'jacobs-ladder', rotation: 0 as const }],
+    })
+    const strips = estimate.pieceInstructions.filter(({ role }) => role === 'strip')
+
+    expect(strips).toHaveLength(2)
+    expect(strips.every(({
+      requiredPieces,
+      pieces,
+      rectanglesToCut,
+      batchBlankCount,
+      batchResultCount,
+    }) =>
+      requiredPieces === 10
+      && pieces === 12
+      && rectanglesToCut === 2
+      && batchBlankCount === 2
+      && batchResultCount === 12)).toBe(true)
+  })
+
+  it('warns and uses full-block templates instead of a square-unit recipe for a stretched HST', () => {
+    const document = {
+      ...createDocument(1, 1),
+      rowSizesCm: [50],
+      columnSizesCm: [25],
+      cells: [{ patternId: 'hst', rotation: 0 as const }],
+    }
+
+    const russian = calculateDetailedFabric(document)
+    const english = calculateDetailedFabric(document, 'en')
+
+    expect(russian.constructionMethods).toEqual([])
+    expect(russian.pieceInstructions).toHaveLength(2)
+    expect(russian.pieceInstructions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        paletteIndex: 0,
+        shape: 'template',
+        method: 'template',
+        rectanglesToCut: 1,
+        pieces: 1,
+        cutWidthCm: 26.27,
+        cutHeightCm: 51.27,
+      }),
+      expect.objectContaining({
+        paletteIndex: 1,
+        shape: 'template',
+        method: 'template',
+        rectanglesToCut: 1,
+        pieces: 1,
+        cutWidthCm: 26.27,
+        cutHeightCm: 51.27,
+      }),
+    ]))
+    expect(russian.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: 'hst',
+        message: expect.stringContaining('квадрат'),
+      }),
+    ])
+    expect(english.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'unsupported-geometry',
+        severity: 'warning',
+        patternId: 'hst',
+        message: expect.stringContaining('square'),
+      }),
+    ])
+  })
+
+  it('rotates an indivisible blank across the width of fabric instead of splitting it', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      rowSizesCm: [10],
+      columnSizesCm: [201.27],
+      fabricWidthCm: 110,
+      cells: [{ patternId: 'solid', rotation: 0 as const }],
+    })
+
+    expect(estimate.pieceInstructions).toEqual([
+      expect.objectContaining({ cutWidthCm: 202.54, cutHeightCm: 11.27, rectanglesToCut: 1 }),
+    ])
+    expect(estimate.cutting[0]).toMatchObject({
+      packedLengthCm: 202.54,
+      purchaseMeters: 2.3,
+    })
+    expect(estimate.diagnostics).toEqual([])
+  })
+
+  it('warns and charges the long dimension when a blank cannot fit either orientation', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      rowSizesCm: [150],
+      columnSizesCm: [120],
+      fabricWidthCm: 110,
+      cells: [{ patternId: 'solid', rotation: 0 as const }],
+    }, 'en')
+
+    expect(estimate.cutting[0].packedLengthCm).toBe(151.27)
+    expect(estimate.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'oversize-blank',
+        severity: 'warning',
+        message: expect.stringContaining('cannot fit'),
+      }),
+    ])
+  })
+
+  it('cuts one canonical Flying Geese unit as one body rectangle and two corner squares', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      rowSizesCm: [10],
+      columnSizesCm: [20],
+      cells: [{ patternId: 'flying-geese', rotation: 0 as const }],
+    })
+
+    expect(estimate.pieceInstructions).toEqual([
+      expect.objectContaining({
+        paletteIndex: 0,
+        role: 'goose-corner',
+        shape: 'square',
+        method: 'flying-geese-sew-and-flip',
+        pieces: 2,
+        rectanglesToCut: 2,
+        cutWidthCm: 11.27,
+        cutHeightCm: 11.27,
+      }),
+      expect.objectContaining({
+        paletteIndex: 1,
+        role: 'goose-body',
+        shape: 'rectangle',
+        method: 'flying-geese-sew-and-flip',
+        pieces: 1,
+        rectanglesToCut: 1,
+        cutWidthCm: 21.27,
+        cutHeightCm: 11.27,
+      }),
+    ])
+    expect(estimate.constructionMethods).toEqual([expect.objectContaining({
+      patternId: 'flying-geese',
+      method: 'flying-geese-sew-and-flip',
+    })])
+    expect(estimate.diagnostics).toEqual([])
+  })
+
+  it('batches no-waste Flying Geese across the whole quilt in groups of four', () => {
+    for (const quantity of [5, 6, 7, 8]) {
+      const estimate = calculateDetailedFabric({
+        ...createDocument(1, quantity),
+        rowSizesCm: [10],
+        columnSizesCm: Array.from({ length: quantity }, () => 20),
+        cells: Array.from({ length: quantity }, () => ({
+          patternId: 'flying-geese',
+          rotation: 0 as const,
+        })),
+      }, 'en', { flyingGeeseMethod: 'no-waste' })
+      const body = estimate.pieceInstructions.find(({ role }) => role === 'goose-body')!
+      const corners = estimate.pieceInstructions.find(({ role }) => role === 'goose-corner')!
+
+      expect(body).toMatchObject({
+        shape: 'square',
+        method: 'flying-geese-no-waste',
+        requiredPieces: quantity,
+        pieces: 8,
+        rectanglesToCut: 2,
+        batchBlankCount: 1,
+        batchResultCount: 4,
+        cutWidthCm: 23.175,
+        cutHeightCm: 23.175,
+      })
+      expect(corners).toMatchObject({
+        shape: 'square',
+        method: 'flying-geese-no-waste',
+        requiredPieces: quantity * 2,
+        pieces: 16,
+        rectanglesToCut: 8,
+        batchBlankCount: 4,
+        batchResultCount: 8,
+        cutWidthCm: 12.223,
+        cutHeightCm: 12.223,
+      })
+      expect(estimate.constructionMethods).toEqual([expect.objectContaining({
+        patternId: 'flying-geese',
+        method: 'flying-geese-no-waste',
+      })])
+    }
+  })
+
+  it('changes cutting area and purchase deterministically with the Flying Geese method', () => {
+    const document = {
+      ...createDocument(1, 4),
+      rowSizesCm: [10],
+      columnSizesCm: [20, 20, 20, 20],
+      cells: Array.from({ length: 4 }, () => ({
+        patternId: 'flying-geese',
+        rotation: 0 as const,
+      })),
+    }
+    const sewAndFlip = calculateDetailedFabric(document)
+    const noWaste = calculateDetailedFabric(document, 'ru', { flyingGeeseMethod: 'no-waste' })
+
+    expect(sewAndFlip.cutting.map(({ cuttingAreaCm2, purchaseMeters }) =>
+      [cuttingAreaCm2, purchaseMeters])).not.toEqual(
+      noWaste.cutting.map(({ cuttingAreaCm2, purchaseMeters }) =>
+        [cuttingAreaCm2, purchaseMeters]),
+    )
+    expect(noWaste.cutting).toMatchObject([
+      { paletteIndex: 0, cuttingAreaCm2: 597.607, purchaseMeters: 0.2 },
+      { paletteIndex: 1, cuttingAreaCm2: 537.081, purchaseMeters: 0.3 },
+    ])
+  })
+
+  it('warns, uses templates, and reports template construction for a non-2:1 goose', () => {
+    const estimate = calculateDetailedFabric({
+      ...createDocument(1, 1),
+      rowSizesCm: [10],
+      columnSizesCm: [30],
+      cells: [{ patternId: 'flying-geese', rotation: 0 as const }],
+    }, 'en')
+
+    expect(estimate.pieceInstructions).toHaveLength(2)
+    expect(estimate.pieceInstructions.every(({ method, shape }) =>
+      method === 'template' && shape === 'template')).toBe(true)
+    expect(estimate.constructionMethods).toEqual([expect.objectContaining({
+      patternId: 'flying-geese',
+      method: 'template',
+    })])
+    expect(estimate.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'unsupported-geometry',
+        message: expect.stringContaining('exactly twice as wide'),
+      }),
+    ])
   })
 
   it('counts merged rectangles as one enlarged block', () => {

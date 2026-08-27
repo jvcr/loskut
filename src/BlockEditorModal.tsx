@@ -11,7 +11,28 @@ export interface BlockEditorModalProps {
 }
 
 const COLOR_TAGS = ['A', 'B', 'C', 'D'] as const
+const COLOR_ROLES = [
+  ['Фон', 'Background'],
+  ['Акцент', 'Accent'],
+  ['Контраст', 'Contrast'],
+  ['Дополнительный', 'Secondary'],
+] as const
 const DEFAULT_DIVISIONS = 4
+
+type LayoutMode = 'grid' | 'flying-geese'
+type GooseRegion = 'left' | 'body' | 'right'
+
+const FLYING_GEESE_REGIONS = [
+  { key: 'left', points: [[0, 0], [0, 1], [0.5, 0]], labelPosition: [13, 48] },
+  { key: 'body', points: [[0, 1], [0.5, 0], [1, 1]], labelPosition: [50, 70] },
+  { key: 'right', points: [[0.5, 0], [1, 0], [1, 1]], labelPosition: [87, 48] },
+] as const satisfies readonly {
+  key: GooseRegion
+  points: PatternShape['points']
+  labelPosition: readonly [number, number]
+}[]
+
+type GooseColors = [number, number, number]
 
 type PatternWithDimensions = BlockPattern & {
   widthCm?: number
@@ -46,6 +67,25 @@ function cellsFromPattern(pattern: BlockPattern | undefined, divisions: number, 
   })
 }
 
+function colorAtPoint(pattern: BlockPattern, x: number, y: number, availableColors: number): number {
+  let color = pattern.background
+  for (const shape of pattern.shapes) {
+    if (pointInPolygon(x, y, shape.points)) color = shape.color
+  }
+  return color >= 0 && color < Math.min(COLOR_TAGS.length, availableColors) ? color : 0
+}
+
+function gooseColorsFromPattern(pattern: BlockPattern | undefined, availableColors: number): GooseColors {
+  if (!pattern) return [0, availableColors > 1 ? 1 : 0, 0]
+  return FLYING_GEESE_REGIONS.map(({ points }) => {
+    const [x, y] = points.reduce<[number, number]>(
+      ([totalX, totalY], [pointX, pointY]) => [totalX + pointX / 3, totalY + pointY / 3],
+      [0, 0],
+    )
+    return colorAtPoint(pattern, x, y, availableColors)
+  }) as GooseColors
+}
+
 function resizeCells(cells: readonly number[], from: number, to: number): number[] {
   return Array.from({ length: to * to }, (_, index) => {
     const row = Math.floor(index / to)
@@ -75,6 +115,15 @@ function shapesFromCells(cells: readonly number[], divisions: number): PatternSh
       ],
     } satisfies PatternShape]
   })
+}
+
+function shapesFromGooseColors(colors: GooseColors): PatternShape[] {
+  const background = colors[0]
+  return FLYING_GEESE_REGIONS.flatMap(({ points }, index) => (
+    index > 0 && colors[index] !== background
+      ? [{ color: colors[index], points } satisfies PatternShape]
+      : []
+  ))
 }
 
 function stableHash(value: string): string {
@@ -115,13 +164,19 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
     : text('Новый блок', 'New block'))
   const [width, setWidth] = useState(String(toDisplayLength(source?.widthCm ?? 25)))
   const [height, setHeight] = useState(String(toDisplayLength(source?.heightCm ?? 25)))
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(
+    String(pattern?.id) === 'flying-geese' ? 'flying-geese' : 'grid',
+  )
   const [divisions, setDivisions] = useState(DEFAULT_DIVISIONS)
   const [showGrid, setShowGrid] = useState(true)
   const [activeColor, setActiveColor] = useState(palette[1] ? 1 : 0)
   const [cells, setCells] = useState(() => cellsFromPattern(pattern, DEFAULT_DIVISIONS, palette.length))
+  const [gooseColors, setGooseColors] = useState<GooseColors>(
+    () => gooseColorsFromPattern(pattern, palette.length),
+  )
   const [saveAttempted, setSaveAttempted] = useState(false)
   const painting = useRef(false)
-  const nameInput = useRef<HTMLInputElement>(null)
+  const lastPaintedCell = useRef<number | null>(null)
   const dialog = useRef<HTMLFormElement>(null)
   const previousMeasurementSystem = useRef(measurementSystem)
   const previousFromDisplayLength = useRef(fromDisplayLength)
@@ -151,12 +206,14 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
     }
     return ''
   }, [formatLength, heightCm, name, palette.length, text, widthCm])
-  const previewShapes = useMemo(() => shapesFromCells(cells, divisions), [cells, divisions])
+  const previewBackground = layoutMode === 'flying-geese' ? gooseColors[0] : 0
+  const previewShapes = useMemo(
+    () => layoutMode === 'flying-geese'
+      ? shapesFromGooseColors(gooseColors)
+      : shapesFromCells(cells, divisions),
+    [cells, divisions, gooseColors, layoutMode],
+  )
 
-  useEffect(() => {
-    nameInput.current?.focus()
-    nameInput.current?.select()
-  }, [])
 
   useEffect(() => {
     if (previousMeasurementSystem.current === measurementSystem) return
@@ -183,7 +240,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
       if (event.key !== 'Tab') return
 
       const focusable = [...(dialog.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled])',
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ) ?? [])]
       const first = focusable[0]
       const last = focusable.at(-1)
@@ -196,7 +253,10 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
         first.focus()
       }
     }
-    const stopPainting = () => { painting.current = false }
+    const stopPainting = () => {
+      painting.current = false
+      lastPaintedCell.current = null
+    }
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('pointerup', stopPainting)
     window.addEventListener('pointercancel', stopPainting)
@@ -209,14 +269,34 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
 
   const paintCell = (index: number) => {
     if (!palette[activeColor] && activeColor !== 0) return
-    setCells((current) => current.map((color, cellIndex) => cellIndex === index ? activeColor : color))
+    if (lastPaintedCell.current === index) return
+    lastPaintedCell.current = index
+    setCells((current) => current[index] === activeColor
+      ? current
+      : current.map((color, cellIndex) => cellIndex === index ? activeColor : color))
+  }
+
+  const paintGooseRegion = (index: number) => {
+    if (!palette[activeColor] && activeColor !== 0) return
+    setGooseColors((current) => current[index] === activeColor
+      ? current
+      : current.map((color, regionIndex) => regionIndex === index ? activeColor : color) as GooseColors)
   }
 
   const startPainting = (event: ReactPointerEvent<HTMLButtonElement>, index: number) => {
     if (event.button !== 0) return
-    event.preventDefault()
     painting.current = true
+    lastPaintedCell.current = null
+    event.currentTarget.setPointerCapture(event.pointerId)
     paintCell(index)
+  }
+
+  const continuePainting = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!painting.current) return
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLButtonElement>('.block-editor-cell')
+    if (!target || !event.currentTarget.contains(target)) return
+    const index = Number(target.dataset.cellIndex)
+    if (Number.isInteger(index)) paintCell(index)
   }
 
   const changeDivisions = (next: number) => {
@@ -229,13 +309,14 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
     setSaveAttempted(true)
     if (validationError) return
 
-    const shapes = previewShapes
-    const signature = JSON.stringify({ name: name.trim(), widthCm, heightCm, divisions, cells })
+    const signature = JSON.stringify(layoutMode === 'flying-geese'
+      ? { name: name.trim(), widthCm, heightCm, layoutMode, gooseColors }
+      : { name: name.trim(), widthCm, heightCm, layoutMode, divisions, cells })
     const result = {
       id: makePatternId(name, signature, String(pattern?.id ?? '')),
       name: name.trim(),
-      background: 0,
-      shapes,
+      background: previewBackground,
+      shapes: previewShapes,
       source: 'custom' as const,
       widthCm,
       heightCm,
@@ -276,12 +357,12 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
           <div>
             <p className="block-editor-eyebrow">{text('Мастерская блока', 'Block workshop')}</p>
             <h2 id="block-editor-title">
-              {pattern ? text('Создать на основе блока', 'Create from block') : text('Создать свой блок', 'Create custom block')}
+              {pattern ? text('Создать новый блок на основе выбранного', 'Create a new block from the selected one') : text('Создать свой блок', 'Create a custom block')}
             </h2>
             <p id="block-editor-intro">
               {text(
-                'Соберите раппорт по клеткам и сохраните его в библиотеку квилта.',
-                'Build a repeat on the grid and save it to the quilt library.',
+                'Выберите ткань и тип раскладки, создайте узор, затем задайте название и размер.',
+                'Choose a fabric and layout, create the design, then name and size it.',
               )}
             </p>
           </div>
@@ -297,130 +378,313 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
 
         <div className="block-editor-body">
           <div className="block-editor-workspace">
-            <div className="block-editor-canvas-heading">
-              <div>
-                <strong>{text('Схема блока', 'Block layout')}</strong>
+            <section className="block-editor-step" aria-labelledby="block-editor-step-one">
+              <div className="block-editor-step-heading">
+                <span className="block-editor-step-number" aria-hidden="true">1</span>
+                <div>
+                  <h3 id="block-editor-step-one">{text('Выберите ткань или цвет', 'Choose a fabric or color')}</h3>
+                  <p>{text('Этим цветом вы будете закрашивать клетки или детали.', 'You will paint cells or pieces with this color.')}</p>
+                </div>
+              </div>
+
+              <fieldset className="block-editor-palette">
+                <legend className="visually-hidden">{text('Ткань для рисования', 'Fabric to paint with')}</legend>
+                <div className="block-editor-swatches">
+                  {COLOR_TAGS.map((tag, index) => {
+                    const color = palette[index]
+                    const role = COLOR_ROLES[index]
+                    return (
+                      <button
+                        className={`block-editor-swatch${activeColor === index ? ' block-editor-swatch--active' : ''}`}
+                        type="button"
+                        key={tag}
+                        onClick={() => setActiveColor(index)}
+                        disabled={!color}
+                        aria-pressed={activeColor === index}
+                        aria-label={color
+                          ? text(`Выбрать ткань ${tag}, ${role[0]}`, `Select fabric ${tag}, ${role[1]}`)
+                          : text(`Ткань ${tag} недоступна`, `Fabric ${tag} unavailable`)}
+                        autoFocus={activeColor === index}
+                      >
+                        <span className="block-editor-swatch-color" style={{ backgroundColor: color }} aria-hidden="true" />
+                        <b>{tag}</b>
+                        {activeColor === index && <span className="block-editor-selected-mark" aria-hidden="true">✓</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </fieldset>
+
+              <p className="block-editor-selected-color" id="block-editor-selected-color" aria-live="polite">
+                <span className="block-editor-selected-color-chip" style={{ backgroundColor: palette[activeColor] ?? palette[0] }} aria-hidden="true" />
                 <span>
-                  {divisions} × {divisions} {text('клеток', 'cells')}
+                  <small>{text('Выбрано для рисования', 'Selected for painting')}</small>
+                  <strong>
+                    {text('Ткань', 'Fabric')} {COLOR_TAGS[activeColor] ?? 'A'}
+                    {' · '}
+                    {text(COLOR_ROLES[activeColor]?.[0] ?? COLOR_ROLES[0][0], COLOR_ROLES[activeColor]?.[1] ?? COLOR_ROLES[0][1])}
+                  </strong>
+                </span>
+              </p>
+            </section>
+
+            <section className="block-editor-step block-editor-drawing-step" aria-labelledby="block-editor-step-two">
+              <div className="block-editor-drawing-heading">
+                <div className="block-editor-step-heading">
+                  <span className="block-editor-step-number" aria-hidden="true">2</span>
+                  <div>
+                    <h3 id="block-editor-step-two">{text('Выберите раскладку и создайте узор', 'Choose a layout and create the design')}</h3>
+                    <p id="block-editor-canvas-help">
+                      {layoutMode === 'flying-geese'
+                        ? text('Выберите ткань, затем нажмите на левую, центральную или правую область.', 'Choose a fabric, then select the left, body, or right region.')
+                        : text('Нажимайте на клетки или ведите по ним, удерживая кнопку.', 'Click cells, or press and drag across them to paint.')}
+                    </p>
+                  </div>
+                </div>
+                <span className="block-editor-grid-count">
+                  {layoutMode === 'flying-geese'
+                    ? text('3 области', '3 regions')
+                    : `${divisions} × ${divisions} ${text('клеток', 'cells')}`}
                 </span>
               </div>
-              <div className="block-editor-compact-actions" aria-label={text('Заливка схемы', 'Layout fill controls')}>
-                <button
-                  type="button"
-                  onClick={() => setCells(Array(divisions * divisions).fill(palette[activeColor] ? activeColor : 0))}
-                >
-                  {text('Залить', 'Fill')}
-                </button>
-                <button type="button" onClick={() => setCells(Array(divisions * divisions).fill(0))}>
-                  {text('Очистить', 'Clear')}
-                </button>
-              </div>
-            </div>
 
-            <div className={`block-editor-canvas${showGrid ? ' block-editor-canvas--grid' : ''}`} style={gridStyle}>
-              {cells.map((color, index) => (
-                <button
-                  className="block-editor-cell"
-                  type="button"
-                  key={index}
-                  style={{ backgroundColor: palette[color] ?? palette[0] }}
-                  onPointerDown={(event) => startPainting(event, index)}
-                  onPointerEnter={() => { if (painting.current) paintCell(index) }}
-                  onClick={() => paintCell(index)}
-                  aria-label={text(
-                    `Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}: цвет ${COLOR_TAGS[color] ?? 'A'}`,
-                    `Cell ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}: color ${COLOR_TAGS[color] ?? 'A'}`,
+              <fieldset className="block-editor-layout-selector">
+                <legend>{text('Раскладка', 'Layout')}</legend>
+                <div>
+                  <label>
+                    <input
+                      type="radio"
+                      name="block-layout"
+                      value="grid"
+                      checked={layoutMode === 'grid'}
+                      onChange={() => setLayoutMode('grid')}
+                    />
+                    <span>{text('Квадратная сетка', 'Square grid')}</span>
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="block-layout"
+                      value="flying-geese"
+                      checked={layoutMode === 'flying-geese'}
+                      onChange={() => setLayoutMode('flying-geese')}
+                    />
+                    <span>{text('Летящий гусь — 3 детали', 'Flying Geese — 3 pieces')}</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              {layoutMode === 'flying-geese' && (
+                <p className="block-editor-goose-explanation">
+                  {text(
+                    'Один прямоугольный блок шьют из прямоугольника корпуса и двух угловых квадратов; в готовом виде это три треугольные области.',
+                    'One rectangular unit is sewn from one body rectangle and two corner squares; the finished visual has three triangular regions.',
                   )}
-                />
-              ))}
-            </div>
+                </p>
+              )}
 
-            <fieldset className="block-editor-palette">
-              <legend>{text('Цвет ткани', 'Fabric color')}</legend>
-              <div className="block-editor-swatches">
-                {COLOR_TAGS.map((tag, index) => {
-                  const color = palette[index]
-                  return (
-                    <button
-                      className={`block-editor-swatch${activeColor === index ? ' block-editor-swatch--active' : ''}`}
-                      type="button"
-                      key={tag}
-                      onClick={() => setActiveColor(index)}
-                      disabled={!color}
-                      aria-pressed={activeColor === index}
-                      aria-label={color
-                        ? text(`Выбрать цвет ${tag}`, `Select color ${tag}`)
-                        : text(`Цвет ${tag} недоступен`, `Color ${tag} unavailable`)}
-                    >
-                      <span className="block-editor-swatch-color" style={{ backgroundColor: color }} aria-hidden="true" />
-                      <b>{tag}</b>
-                    </button>
-                  )
-                })}
-              </div>
-            </fieldset>
+              {layoutMode === 'grid' ? (
+                <>
+                  <div
+                    className={`block-editor-canvas${showGrid ? ' block-editor-canvas--grid' : ''}`}
+                    style={gridStyle}
+                    role="group"
+                    aria-label={text('Холст блока', 'Block canvas')}
+                    aria-describedby="block-editor-canvas-help block-editor-selected-color"
+                    onPointerMove={continuePainting}
+                  >
+                    {cells.map((color, index) => (
+                      <button
+                        className="block-editor-cell"
+                        type="button"
+                        key={index}
+                        data-cell-index={index}
+                        style={{ backgroundColor: palette[color] ?? palette[0] }}
+                        onPointerDown={(event) => startPainting(event, index)}
+                        onClick={() => {
+                          lastPaintedCell.current = null
+                          paintCell(index)
+                        }}
+                        aria-label={text(
+                          `Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Сейчас ткань ${COLOR_TAGS[color] ?? 'A'}. Закрасить тканью ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                          `Cell ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Currently fabric ${COLOR_TAGS[color] ?? 'A'}. Paint with fabric ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                        )}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="block-editor-drawing-controls">
+                    <div className="block-editor-compact-actions" aria-label={text('Действия с узором', 'Design actions')}>
+                      <button
+                        type="button"
+                        onClick={() => setCells(Array(divisions * divisions).fill(palette[activeColor] ? activeColor : 0))}
+                      >
+                        {text('Залить всё выбранным цветом', 'Fill all with selected color')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCells(Array(divisions * divisions).fill(0))}
+                        aria-label={text('Очистить узор и вернуть все клетки к ткани A', 'Clear design and reset every cell to fabric A')}
+                      >
+                        {text('Очистить узор', 'Clear design')}
+                      </button>
+                    </div>
+                    <div className="block-editor-grid-controls">
+                      <label className="block-editor-inline-field">
+                        <span>{text('Сетка', 'Grid')}</span>
+                        <select
+                          value={divisions}
+                          onChange={(event) => changeDivisions(Number(event.target.value))}
+                          aria-label={text('Изменить количество клеток в сетке', 'Change the number of cells in the grid')}
+                        >
+                          {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
+                            <option key={value} value={value}>{value} × {value}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block-editor-toggle">
+                        <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
+                        <span aria-hidden="true" />
+                        {text('Линии сетки', 'Grid lines')}
+                      </label>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="block-editor-goose-editor">
+                  <svg
+                    className="block-editor-goose-canvas"
+                    viewBox="0 0 100 50"
+                    role="group"
+                    aria-label={text('Холст блока «Летящий гусь» с тремя областями', 'Flying Geese block canvas with three regions')}
+                    aria-describedby="block-editor-canvas-help block-editor-selected-color"
+                  >
+                    {FLYING_GEESE_REGIONS.map(({ key, points, labelPosition }, index) => {
+                      const regionName = key === 'left'
+                        ? text('Левая область', 'Left region')
+                        : key === 'body'
+                          ? text('Корпус гуся', 'Goose body')
+                          : text('Правая область', 'Right region')
+                      const shortName = key === 'left'
+                        ? text('Левая', 'Left')
+                        : key === 'body'
+                          ? text('Корпус', 'Body')
+                          : text('Правая', 'Right')
+                      const colorTag = COLOR_TAGS[gooseColors[index]] ?? 'A'
+                      return (
+                        <g
+                          className="block-editor-goose-region"
+                          key={key}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => paintGooseRegion(index)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return
+                            event.preventDefault()
+                            paintGooseRegion(index)
+                          }}
+                          aria-label={text(
+                            `${regionName}. Сейчас ткань ${colorTag}. Закрасить тканью ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                            `${regionName}. Currently fabric ${colorTag}. Paint with fabric ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                          )}
+                        >
+                          <polygon
+                            points={points.map(([x, y]) => `${x * 100},${y * 50}`).join(' ')}
+                            fill={palette[gooseColors[index]] ?? palette[0]}
+                          />
+                          <text x={labelPosition[0]} y={labelPosition[1] / 2} aria-hidden="true">
+                            <tspan x={labelPosition[0]}>{shortName}</tspan>
+                            <tspan className="block-editor-goose-fabric-label" x={labelPosition[0]} dy="6">
+                              {text('Ткань', 'Fabric')} {colorTag}
+                            </tspan>
+                          </text>
+                        </g>
+                      )
+                    })}
+                  </svg>
+                  <div className="block-editor-goose-region-key" aria-hidden="true">
+                    {gooseColors.map((color, index) => (
+                      <span key={FLYING_GEESE_REGIONS[index].key}>
+                        <i style={{ backgroundColor: palette[color] ?? palette[0] }} />
+                        {index === 0
+                          ? text('Левая', 'Left')
+                          : index === 1
+                            ? text('Корпус', 'Body')
+                            : text('Правая', 'Right')}
+                        {' · '}{text('ткань', 'fabric')} {COLOR_TAGS[color] ?? 'A'}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
           </div>
 
-          <aside className="block-editor-settings" aria-label={text('Параметры блока', 'Block settings')}>
-            <label className="block-editor-field block-editor-field--wide">
-              <span>{text('Название', 'Name')}</span>
-              <input
-                ref={nameInput}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                maxLength={80}
-                aria-invalid={saveAttempted && !name.trim()}
-                aria-describedby="block-editor-status"
-              />
-            </label>
-
-            <div className="block-editor-dimensions">
-              <label className="block-editor-field">
-                <span>{text('Ширина', 'Width')}, {lengthUnit}</span>
-                <input
-                  type="number"
-                  min={String(toDisplayLength(minimumSizeCm))}
-                  max={String(toDisplayLength(maximumSizeCm))}
-                  step={measurementSystem === 'metric' ? '0.1' : '0.01'}
-                  value={width}
-                  onChange={(event) => setWidth(event.target.value)}
-                  aria-invalid={saveAttempted && (!Number.isFinite(widthCm) || widthCm < minimumSizeCm || widthCm > maximumSizeCm)}
-                  aria-describedby="block-editor-status"
-                />
-              </label>
-              <label className="block-editor-field">
-                <span>{text('Высота', 'Height')}, {lengthUnit}</span>
-                <input
-                  type="number"
-                  min={String(toDisplayLength(minimumSizeCm))}
-                  max={String(toDisplayLength(maximumSizeCm))}
-                  step={measurementSystem === 'metric' ? '0.1' : '0.01'}
-                  value={height}
-                  onChange={(event) => setHeight(event.target.value)}
-                  aria-invalid={saveAttempted && (!Number.isFinite(heightCm) || heightCm < minimumSizeCm || heightCm > maximumSizeCm)}
-                  aria-describedby="block-editor-status"
-                />
-              </label>
+          <aside className="block-editor-settings" aria-labelledby="block-editor-settings-title">
+            <div className="block-editor-step-heading block-editor-settings-heading">
+              <span className="block-editor-step-number" aria-hidden="true">3</span>
+              <div>
+                <h3 id="block-editor-settings-title">{text('Параметры блока', 'Block settings')}</h3>
+                <p>{text('Назовите блок, задайте готовый размер и сохраните.', 'Name the block, set its finished size, and save it.')}</p>
+              </div>
             </div>
 
-            <label className="block-editor-field block-editor-field--wide">
-              <span>{text('Деления сетки', 'Grid divisions')}</span>
-              <select value={divisions} onChange={(event) => changeDivisions(Number(event.target.value))}>
-                {Array.from({ length: 8 }, (_, index) => index + 1).map((value) => (
-                  <option key={value} value={value}>{value} × {value}</option>
-                ))}
-              </select>
-            </label>
+            <div className="block-editor-settings-fields">
+              <label className="block-editor-field block-editor-field--wide">
+                <span>{text('Название нового блока', 'New block name')}</span>
+                <input
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={80}
+                  aria-invalid={saveAttempted && !name.trim()}
+                  aria-describedby="block-editor-status"
+                />
+              </label>
 
-            <label className="block-editor-toggle">
-              <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
-              <span aria-hidden="true" />
-              {text('Показывать линии построения', 'Show construction lines')}
-            </label>
+              <div className="block-editor-dimensions">
+                <label className="block-editor-field">
+                  <span>{text('Готовая ширина', 'Finished width')}, {lengthUnit}</span>
+                  <input
+                    type="number"
+                    min={String(toDisplayLength(minimumSizeCm))}
+                    max={String(toDisplayLength(maximumSizeCm))}
+                    step={measurementSystem === 'metric' ? '0.1' : '0.01'}
+                    value={width}
+                    onChange={(event) => setWidth(event.target.value)}
+                    aria-invalid={saveAttempted && (!Number.isFinite(widthCm) || widthCm < minimumSizeCm || widthCm > maximumSizeCm)}
+                    aria-describedby={`block-editor-status${layoutMode === 'flying-geese' ? ' block-editor-ratio-note' : ''}`}
+                  />
+                </label>
+                <label className="block-editor-field">
+                  <span>{text('Готовая высота', 'Finished height')}, {lengthUnit}</span>
+                  <input
+                    type="number"
+                    min={String(toDisplayLength(minimumSizeCm))}
+                    max={String(toDisplayLength(maximumSizeCm))}
+                    step={measurementSystem === 'metric' ? '0.1' : '0.01'}
+                    value={height}
+                    onChange={(event) => setHeight(event.target.value)}
+                    aria-invalid={saveAttempted && (!Number.isFinite(heightCm) || heightCm < minimumSizeCm || heightCm > maximumSizeCm)}
+                    aria-describedby={`block-editor-status${layoutMode === 'flying-geese' ? ' block-editor-ratio-note' : ''}`}
+                  />
+                </label>
+                {layoutMode === 'flying-geese' && (
+                  <p className="block-editor-ratio-note" id="block-editor-ratio-note">
+                    {text(
+                      'Рекомендуемая готовая пропорция: ширина 2 : высота 1. Значения не меняются автоматически.',
+                      'Recommended finished ratio: width 2 : height 1. Values are not changed automatically.',
+                    )}
+                  </p>
+                )}
+              </div>
+            </div>
 
-            <div className="block-editor-preview-section">
+            <section className="block-editor-preview-section" aria-labelledby="block-editor-preview-title">
               <div className="block-editor-section-title">
-                <strong>{text('Предпросмотр', 'Preview')}</strong>
+                <div>
+                  <strong id="block-editor-preview-title">{text('Предпросмотр', 'Preview')}</strong>
+                  <small>{text('Для проверки пропорций', 'For checking proportions')}</small>
+                </div>
                 <span>
                   {Number.isFinite(widthCm) && widthCm > 0 ? formatLength(widthCm) : '—'}
                   {' × '}
@@ -431,10 +695,11 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                 <div className="block-editor-preview" style={previewStyle}>
                   <svg
                     viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
                     role="img"
                     aria-label={text('Предпросмотр нового блока', 'New block preview')}
                   >
-                    <rect width="100" height="100" fill={palette[0]} />
+                    <rect width="100" height="100" fill={palette[previewBackground] ?? palette[0]} />
                     {previewShapes.map((shape, index) => (
                       <polygon
                         key={index}
@@ -442,14 +707,21 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                         fill={palette[shape.color] ?? palette[0]}
                       />
                     ))}
-                    {showGrid && Array.from({ length: divisions - 1 }, (_, index) => index + 1).flatMap((value) => [
+                    {layoutMode === 'grid' && showGrid && Array.from({ length: divisions - 1 }, (_, index) => index + 1).flatMap((value) => [
                       <line key={`v-${value}`} x1={value * 100 / divisions} x2={value * 100 / divisions} y1="0" y2="100" />,
                       <line key={`h-${value}`} y1={value * 100 / divisions} y2={value * 100 / divisions} x1="0" x2="100" />,
                     ])}
                   </svg>
                 </div>
               </div>
-            </div>
+            </section>
+
+            <p className="block-editor-save-note">
+              <strong>{text('Будет создан новый блок.', 'A new block will be created.')}</strong>
+              {pattern
+                ? text(' Исходный блок останется без изменений.', ' The source block will stay unchanged.')
+                : text(' Он появится в библиотеке этого квилта.', ' It will appear in this quilt’s library.')}
+            </p>
           </aside>
         </div>
 
@@ -457,16 +729,15 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
           <p id="block-editor-status" className={`block-editor-status${saveAttempted && validationError ? ' block-editor-status--error' : ''}`} role="status">
             {saveAttempted && validationError
               ? validationError
-              : text(
-                'Блок сохранится как новый — исходный узор не изменится.',
-                'The block will be saved as new—the source pattern will not change.',
-              )}
+              : pattern
+                ? text('Шаг 3 из 3 · Исходный блок останется без изменений.', 'Step 3 of 3 · The source block will stay unchanged.')
+                : text('Шаг 3 из 3 · Новый блок появится в библиотеке квилта.', 'Step 3 of 3 · The new block will appear in the quilt library.')}
           </p>
           <div className="block-editor-footer-actions">
             <button className="block-editor-secondary" type="button" onClick={onClose}>
               {text('Отмена', 'Cancel')}
             </button>
-            <button className="block-editor-primary" type="submit">{text('Сохранить блок', 'Save block')}</button>
+            <button className="block-editor-primary" type="submit">{text('Сохранить как новый блок', 'Save as new block')}</button>
           </div>
         </footer>
       </form>

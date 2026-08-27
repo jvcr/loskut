@@ -128,8 +128,7 @@ export const STANDARD_PATTERNS: readonly BlockPattern[] = [
     name: 'Летящие гуси',
     background: 0,
     shapes: [
-      triangle(1, [0, 0.5], [0.5, 0], [1, 0.5]),
-      triangle(2, [0, 1], [0.5, 0.5], [1, 1]),
+      triangle(1, [0, 1], [0.5, 0], [1, 1]),
     ],
   },
   {
