@@ -1087,9 +1087,17 @@ export default function EditorPage({ initialDocument, onBack, onSave, onSaveBloc
           pattern={blockEditor === 'new' ? undefined : blockEditor}
           palette={document.palette}
           onClose={() => setBlockEditor(null)}
-          onSave={(pattern) => {
+          onSave={(pattern, palette) => {
             commit((current) => ({
               ...current,
+              palette,
+              paletteLocks: palette.map((_, index) => current.paletteLocks?.[index] ?? false),
+              fabricFills: palette.map((_, index) => current.fabricFills?.[index] ?? null),
+              fabricPlacements: palette.map((_, index) => current.fabricPlacements?.[index] ?? {
+                zoom: 1,
+                positionX: 50,
+                positionY: 50,
+              }),
               customPatterns: [...(current.customPatterns ?? []).filter((candidate) => candidate.id !== pattern.id), pattern],
             }))
             setActivePattern(pattern.id)

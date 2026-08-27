@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
-import type { BlockPattern, PatternShape } from './editorModel'
+import { PATTERNS, type BlockPattern, type PatternShape } from './editorModel'
 import { usePreferences } from './i18n'
 import './block-editor.css'
 
@@ -7,19 +7,19 @@ export interface BlockEditorModalProps {
   pattern?: BlockPattern
   palette: readonly string[]
   onClose(): void
-  onSave(pattern: BlockPattern): void
+  onSave(pattern: BlockPattern, palette: readonly string[]): void
 }
 
-const COLOR_TAGS = ['A', 'B', 'C', 'D'] as const
 const COLOR_ROLES = [
   ['Фон', 'Background'],
   ['Акцент', 'Accent'],
   ['Контраст', 'Contrast'],
   ['Дополнительный', 'Secondary'],
 ] as const
+const colorTag = (index: number): string => index < 26 ? String.fromCharCode(65 + index) : String(index + 1)
 const DEFAULT_DIVISIONS = 4
 
-type LayoutMode = 'grid' | 'flying-geese'
+type LayoutMode = 'grid' | 'flying-geese' | 'template'
 type GooseRegion = 'left' | 'body' | 'right'
 
 const FLYING_GEESE_REGIONS = [
@@ -63,7 +63,7 @@ function cellsFromPattern(pattern: BlockPattern | undefined, divisions: number, 
     for (const shape of pattern.shapes) {
       if (pointInPolygon(x, y, shape.points)) color = shape.color
     }
-    return color >= 0 && color < Math.min(COLOR_TAGS.length, availableColors) ? color : 0
+    return color >= 0 && color < availableColors ? color : 0
   })
 }
 
@@ -72,7 +72,7 @@ function colorAtPoint(pattern: BlockPattern, x: number, y: number, availableColo
   for (const shape of pattern.shapes) {
     if (pointInPolygon(x, y, shape.points)) color = shape.color
   }
-  return color >= 0 && color < Math.min(COLOR_TAGS.length, availableColors) ? color : 0
+  return color >= 0 && color < availableColors ? color : 0
 }
 
 function gooseColorsFromPattern(pattern: BlockPattern | undefined, availableColors: number): GooseColors {
@@ -146,6 +146,16 @@ function makePatternId(name: string, signature: string, sourceId?: string): Bloc
   return (candidate === sourceId ? `${candidate}-copy` : candidate) as BlockPattern['id']
 }
 
+function editablePattern(pattern: BlockPattern): BlockPattern {
+  return {
+    ...pattern,
+    shapes: pattern.shapes.map((shape) => ({
+      ...shape,
+      points: shape.points.map(([x, y]) => [x, y] as const),
+    })),
+  }
+}
+
 
 export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEditorModalProps) {
   const {
@@ -165,8 +175,13 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
   const [width, setWidth] = useState(String(toDisplayLength(source?.widthCm ?? 25)))
   const [height, setHeight] = useState(String(toDisplayLength(source?.heightCm ?? 25)))
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(
-    String(pattern?.id) === 'flying-geese' ? 'flying-geese' : 'grid',
+    String(pattern?.id) === 'flying-geese' ? 'flying-geese' : pattern ? 'template' : 'grid',
   )
+  const [editorPalette, setEditorPalette] = useState(() => [...palette])
+  const [newColor, setNewColor] = useState('#f4a261')
+  const [template, setTemplate] = useState<BlockPattern>(() => editablePattern(
+    pattern ?? PATTERNS.find(({ id }) => id === 'grandmothers-flower-garden') ?? PATTERNS[0],
+  ))
   const [divisions, setDivisions] = useState(DEFAULT_DIVISIONS)
   const [showGrid, setShowGrid] = useState(true)
   const [activeColor, setActiveColor] = useState(palette[1] ? 1 : 0)
@@ -201,17 +216,23 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
         `Height must be between ${formatLength(minimumSizeCm)} and ${formatLength(maximumSizeCm)}.`,
       )
     }
-    if (palette.length === 0) {
+    if (editorPalette.length === 0) {
       return text('Добавьте хотя бы один цвет в палитру квилта.', 'Add at least one color to the quilt palette.')
     }
     return ''
-  }, [formatLength, heightCm, name, palette.length, text, widthCm])
-  const previewBackground = layoutMode === 'flying-geese' ? gooseColors[0] : 0
+  }, [editorPalette.length, formatLength, heightCm, name, text, widthCm])
+  const previewBackground = layoutMode === 'flying-geese'
+    ? gooseColors[0]
+    : layoutMode === 'template'
+      ? template.background
+      : 0
   const previewShapes = useMemo(
     () => layoutMode === 'flying-geese'
       ? shapesFromGooseColors(gooseColors)
-      : shapesFromCells(cells, divisions),
-    [cells, divisions, gooseColors, layoutMode],
+      : layoutMode === 'template'
+        ? template.shapes
+        : shapesFromCells(cells, divisions),
+    [cells, divisions, gooseColors, layoutMode, template.shapes],
   )
 
 
@@ -268,7 +289,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
   }, [onClose])
 
   const paintCell = (index: number) => {
-    if (!palette[activeColor] && activeColor !== 0) return
+    if (!editorPalette[activeColor]) return
     if (lastPaintedCell.current === index) return
     lastPaintedCell.current = index
     setCells((current) => current[index] === activeColor
@@ -277,10 +298,22 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
   }
 
   const paintGooseRegion = (index: number) => {
-    if (!palette[activeColor] && activeColor !== 0) return
+    if (!editorPalette[activeColor]) return
     setGooseColors((current) => current[index] === activeColor
       ? current
       : current.map((color, regionIndex) => regionIndex === index ? activeColor : color) as GooseColors)
+  }
+
+  const paintTemplateRegion = (index: number | 'background') => {
+    if (!editorPalette[activeColor]) return
+    setTemplate((current) => index === 'background'
+      ? { ...current, background: activeColor }
+      : {
+          ...current,
+          shapes: current.shapes.map((shape, shapeIndex) => (
+            shapeIndex === index ? { ...shape, color: activeColor } : shape
+          )),
+        })
   }
 
   const startPainting = (event: ReactPointerEvent<HTMLButtonElement>, index: number) => {
@@ -311,7 +344,9 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
 
     const signature = JSON.stringify(layoutMode === 'flying-geese'
       ? { name: name.trim(), widthCm, heightCm, layoutMode, gooseColors }
-      : { name: name.trim(), widthCm, heightCm, layoutMode, divisions, cells })
+      : layoutMode === 'template'
+        ? { name: name.trim(), widthCm, heightCm, layoutMode, background: template.background, shapes: template.shapes }
+        : { name: name.trim(), widthCm, heightCm, layoutMode, divisions, cells })
     const result = {
       id: makePatternId(name, signature, String(pattern?.id ?? '')),
       name: name.trim(),
@@ -322,7 +357,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
       heightCm,
       unsupportedReason: undefined,
     }
-    onSave(result)
+    onSave(result, editorPalette)
   }
 
   const gridStyle = { '--block-editor-divisions': divisions } as CSSProperties
@@ -390,20 +425,20 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
               <fieldset className="block-editor-palette">
                 <legend className="visually-hidden">{text('Ткань для рисования', 'Fabric to paint with')}</legend>
                 <div className="block-editor-swatches">
-                  {COLOR_TAGS.map((tag, index) => {
-                    const color = palette[index]
+                  {editorPalette.map((color, index) => {
+                    const tag = colorTag(index)
                     const role = COLOR_ROLES[index]
                     return (
                       <button
                         className={`block-editor-swatch${activeColor === index ? ' block-editor-swatch--active' : ''}`}
                         type="button"
-                        key={tag}
+                        key={`${color}-${index}`}
                         onClick={() => setActiveColor(index)}
-                        disabled={!color}
                         aria-pressed={activeColor === index}
-                        aria-label={color
-                          ? text(`Выбрать ткань ${tag}, ${role[0]}`, `Select fabric ${tag}, ${role[1]}`)
-                          : text(`Ткань ${tag} недоступна`, `Fabric ${tag} unavailable`)}
+                        aria-label={text(
+                          `Выбрать цвет ${tag}${role ? `, ${role[0]}` : ''}`,
+                          `Select color ${tag}${role ? `, ${role[1]}` : ''}`,
+                        )}
                         autoFocus={activeColor === index}
                       >
                         <span className="block-editor-swatch-color" style={{ backgroundColor: color }} aria-hidden="true" />
@@ -414,15 +449,39 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                   })}
                 </div>
               </fieldset>
+              <div className="block-editor-add-color">
+                <label>
+                  <span>{text('Новый цвет', 'New color')}</span>
+                  <input
+                    type="color"
+                    value={newColor}
+                    onChange={(event) => setNewColor(event.target.value)}
+                    aria-label={text('Выбрать новый цвет', 'Choose a new color')}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const existing = editorPalette.findIndex((color) => color.toLowerCase() === newColor.toLowerCase())
+                    if (existing >= 0) {
+                      setActiveColor(existing)
+                      return
+                    }
+                    setEditorPalette((current) => [...current, newColor])
+                    setActiveColor(editorPalette.length)
+                  }}
+                >
+                  {text('Добавить цвет', 'Add color')}
+                </button>
+              </div>
 
               <p className="block-editor-selected-color" id="block-editor-selected-color" aria-live="polite">
-                <span className="block-editor-selected-color-chip" style={{ backgroundColor: palette[activeColor] ?? palette[0] }} aria-hidden="true" />
+                <span className="block-editor-selected-color-chip" style={{ backgroundColor: editorPalette[activeColor] ?? editorPalette[0] }} aria-hidden="true" />
                 <span>
                   <small>{text('Выбрано для рисования', 'Selected for painting')}</small>
                   <strong>
-                    {text('Ткань', 'Fabric')} {COLOR_TAGS[activeColor] ?? 'A'}
-                    {' · '}
-                    {text(COLOR_ROLES[activeColor]?.[0] ?? COLOR_ROLES[0][0], COLOR_ROLES[activeColor]?.[1] ?? COLOR_ROLES[0][1])}
+                    {text('Цвет', 'Color')} {colorTag(activeColor)}
+                    {COLOR_ROLES[activeColor] ? ` · ${text(COLOR_ROLES[activeColor][0], COLOR_ROLES[activeColor][1])}` : ''}
                   </strong>
                 </span>
               </p>
@@ -436,15 +495,19 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                     <h3 id="block-editor-step-two">{text('Выберите раскладку и создайте узор', 'Choose a layout and create the design')}</h3>
                     <p id="block-editor-canvas-help">
                       {layoutMode === 'flying-geese'
-                        ? text('Выберите ткань, затем нажмите на левую, центральную или правую область.', 'Choose a fabric, then select the left, body, or right region.')
-                        : text('Нажимайте на клетки или ведите по ним, удерживая кнопку.', 'Click cells, or press and drag across them to paint.')}
+                        ? text('Выберите цвет, затем нажмите на левую, центральную или правую область.', 'Choose a color, then select the left, body, or right region.')
+                        : layoutMode === 'template'
+                          ? text('Выберите цвет и нажимайте на детали орнамента. Геометрия исходного блока сохраняется точно.', 'Choose a color and click ornament pieces. The source block geometry is preserved exactly.')
+                          : text('Нажимайте на клетки или ведите по ним, удерживая кнопку.', 'Click cells, or press and drag across them to paint.')}
                     </p>
                   </div>
                 </div>
                 <span className="block-editor-grid-count">
                   {layoutMode === 'flying-geese'
                     ? text('3 области', '3 regions')
-                    : `${divisions} × ${divisions} ${text('клеток', 'cells')}`}
+                    : layoutMode === 'template'
+                      ? `${template.shapes.length + 1} ${text('деталей', 'pieces')}`
+                      : `${divisions} × ${divisions} ${text('клеток', 'cells')}`}
                 </span>
               </div>
 
@@ -465,6 +528,16 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                     <input
                       type="radio"
                       name="block-layout"
+                      value="template"
+                      checked={layoutMode === 'template'}
+                      onChange={() => setLayoutMode('template')}
+                    />
+                    <span>{text('Орнамент из библиотеки', 'Library ornament')}</span>
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="block-layout"
                       value="flying-geese"
                       checked={layoutMode === 'flying-geese'}
                       onChange={() => setLayoutMode('flying-geese')}
@@ -473,6 +546,24 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                   </label>
                 </div>
               </fieldset>
+              {layoutMode === 'template' && (
+                <label className="block-editor-template-select">
+                  <span>{text('Основа орнамента', 'Ornament template')}</span>
+                  <select
+                    value={template.id}
+                    onChange={(event) => {
+                      const selected = PATTERNS.find(({ id }) => String(id) === event.target.value)
+                      if (selected) setTemplate(editablePattern(selected))
+                    }}
+                  >
+                    {PATTERNS.filter(({ shapes }) => shapes.length > 0).map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {patternName(String(candidate.id), candidate.name)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
 
               {layoutMode === 'flying-geese' && (
                 <p className="block-editor-goose-explanation">
@@ -499,15 +590,15 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                         type="button"
                         key={index}
                         data-cell-index={index}
-                        style={{ backgroundColor: palette[color] ?? palette[0] }}
+                        style={{ backgroundColor: editorPalette[color] ?? editorPalette[0] }}
                         onPointerDown={(event) => startPainting(event, index)}
                         onClick={() => {
                           lastPaintedCell.current = null
                           paintCell(index)
                         }}
                         aria-label={text(
-                          `Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Сейчас ткань ${COLOR_TAGS[color] ?? 'A'}. Закрасить тканью ${COLOR_TAGS[activeColor] ?? 'A'}.`,
-                          `Cell ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Currently fabric ${COLOR_TAGS[color] ?? 'A'}. Paint with fabric ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                          `Клетка ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Сейчас цвет ${colorTag(color)}. Закрасить цветом ${colorTag(activeColor)}.`,
+                          `Cell ${Math.floor(index / divisions) + 1}, ${index % divisions + 1}. Currently color ${colorTag(color)}. Paint with color ${colorTag(activeColor)}.`,
                         )}
                       />
                     ))}
@@ -517,7 +608,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                     <div className="block-editor-compact-actions" aria-label={text('Действия с узором', 'Design actions')}>
                       <button
                         type="button"
-                        onClick={() => setCells(Array(divisions * divisions).fill(palette[activeColor] ? activeColor : 0))}
+                        onClick={() => setCells(Array(divisions * divisions).fill(editorPalette[activeColor] ? activeColor : 0))}
                       >
                         {text('Залить всё выбранным цветом', 'Fill all with selected color')}
                       </button>
@@ -550,6 +641,63 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                     </div>
                   </div>
                 </>
+              ) : layoutMode === 'template' ? (
+                <div className="block-editor-template-editor">
+                  <svg
+                    className="block-editor-template-canvas"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    role="group"
+                    aria-label={text('Редактор деталей орнамента', 'Ornament piece editor')}
+                    aria-describedby="block-editor-canvas-help block-editor-selected-color"
+                  >
+                    <rect
+                      width="100"
+                      height="100"
+                      fill={editorPalette[template.background] ?? editorPalette[0]}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => paintTemplateRegion('background')}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') paintTemplateRegion('background')
+                      }}
+                      aria-label={text(
+                        `Фон. Сейчас цвет ${colorTag(template.background)}. Закрасить цветом ${colorTag(activeColor)}.`,
+                        `Background. Currently color ${colorTag(template.background)}. Paint with color ${colorTag(activeColor)}.`,
+                      )}
+                    />
+                    {template.shapes.map((shape, index) => (
+                      <polygon
+                        className="block-editor-template-region"
+                        key={index}
+                        points={shape.points.map(([x, y]) => `${x * 100},${y * 100}`).join(' ')}
+                        fill={editorPalette[shape.color] ?? editorPalette[0]}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => paintTemplateRegion(index)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') paintTemplateRegion(index)
+                        }}
+                        aria-label={text(
+                          `Деталь ${index + 1}. Сейчас цвет ${colorTag(shape.color)}. Закрасить цветом ${colorTag(activeColor)}.`,
+                          `Piece ${index + 1}. Currently color ${colorTag(shape.color)}. Paint with color ${colorTag(activeColor)}.`,
+                        )}
+                      />
+                    ))}
+                  </svg>
+                  <p>{text(
+                    'Каждая фигура редактируется отдельно — треугольники, ромбы, шестиугольники и составные орнаменты не превращаются в квадраты.',
+                    'Every shape is edited independently—triangles, diamonds, hexagons, and compound ornaments are not converted into squares.',
+                  )}</p>
+                  <button
+                    className="block-editor-template-background"
+                    type="button"
+                    onClick={() => paintTemplateRegion('background')}
+                  >
+                    <span style={{ backgroundColor: editorPalette[template.background] ?? editorPalette[0] }} aria-hidden="true" />
+                    {text('Покрасить фон выбранным цветом', 'Paint background with selected color')}
+                  </button>
+                </div>
               ) : (
                 <div className="block-editor-goose-editor">
                   <svg
@@ -570,7 +718,7 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                         : key === 'body'
                           ? text('Корпус', 'Body')
                           : text('Правая', 'Right')
-                      const colorTag = COLOR_TAGS[gooseColors[index]] ?? 'A'
+                      const regionColorTag = colorTag(gooseColors[index])
                       return (
                         <g
                           className="block-editor-goose-region"
@@ -584,18 +732,18 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                             paintGooseRegion(index)
                           }}
                           aria-label={text(
-                            `${regionName}. Сейчас ткань ${colorTag}. Закрасить тканью ${COLOR_TAGS[activeColor] ?? 'A'}.`,
-                            `${regionName}. Currently fabric ${colorTag}. Paint with fabric ${COLOR_TAGS[activeColor] ?? 'A'}.`,
+                            `${regionName}. Сейчас цвет ${regionColorTag}. Закрасить цветом ${colorTag(activeColor)}.`,
+                            `${regionName}. Currently color ${regionColorTag}. Paint with color ${colorTag(activeColor)}.`,
                           )}
                         >
                           <polygon
                             points={points.map(([x, y]) => `${x * 100},${y * 50}`).join(' ')}
-                            fill={palette[gooseColors[index]] ?? palette[0]}
+                            fill={editorPalette[gooseColors[index]] ?? editorPalette[0]}
                           />
                           <text x={labelPosition[0]} y={labelPosition[1] / 2} aria-hidden="true">
                             <tspan x={labelPosition[0]}>{shortName}</tspan>
                             <tspan className="block-editor-goose-fabric-label" x={labelPosition[0]} dy="6">
-                              {text('Ткань', 'Fabric')} {colorTag}
+                              {text('Цвет', 'Color')} {regionColorTag}
                             </tspan>
                           </text>
                         </g>
@@ -605,13 +753,13 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                   <div className="block-editor-goose-region-key" aria-hidden="true">
                     {gooseColors.map((color, index) => (
                       <span key={FLYING_GEESE_REGIONS[index].key}>
-                        <i style={{ backgroundColor: palette[color] ?? palette[0] }} />
+                        <i style={{ backgroundColor: editorPalette[color] ?? editorPalette[0] }} />
                         {index === 0
                           ? text('Левая', 'Left')
                           : index === 1
                             ? text('Корпус', 'Body')
                             : text('Правая', 'Right')}
-                        {' · '}{text('ткань', 'fabric')} {COLOR_TAGS[color] ?? 'A'}
+                        {' · '}{text('цвет', 'color')} {colorTag(color)}
                       </span>
                     ))}
                   </div>
@@ -699,12 +847,12 @@ export function BlockEditorModal({ pattern, palette, onClose, onSave }: BlockEdi
                     role="img"
                     aria-label={text('Предпросмотр нового блока', 'New block preview')}
                   >
-                    <rect width="100" height="100" fill={palette[previewBackground] ?? palette[0]} />
+                    <rect width="100" height="100" fill={editorPalette[previewBackground] ?? editorPalette[0]} />
                     {previewShapes.map((shape, index) => (
                       <polygon
                         key={index}
                         points={shape.points.map(([x, y]) => `${x * 100},${y * 100}`).join(' ')}
-                        fill={palette[shape.color] ?? palette[0]}
+                        fill={editorPalette[shape.color] ?? editorPalette[0]}
                       />
                     ))}
                     {layoutMode === 'grid' && showGrid && Array.from({ length: divisions - 1 }, (_, index) => index + 1).flatMap((value) => [
